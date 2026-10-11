@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/cas"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/aperture-vault"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
