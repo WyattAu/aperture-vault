@@ -169,3 +169,101 @@ fn open_on_a_missing_root_creates_it() {
     let (addr, _) = store.put_bytes(b"lazy init").expect("put");
     assert!(store.has(&addr));
 }
+
+#[test]
+fn address_exposes_its_raw_digest() {
+    let addr = hash_bytes(b"raw");
+    assert_eq!(
+        addr.as_bytes(),
+        &hash_bytes(b"raw").as_bytes().to_owned()[..]
+    );
+    assert_eq!(addr.as_bytes().len(), Address::LENGTH);
+}
+
+#[test]
+fn hex_parsing_refuses_odd_length_and_bad_digits() {
+    // Odd length: the final half-byte has no partner.
+    let odd = "abcde";
+    assert!(matches!(
+        Address::parse_hex(odd),
+        Err(aperture_cas::CasError::BadAddress { .. })
+    ));
+    // Even length but non-hex digits in the second position.
+    let even_bad = format!("{}{}", "0".repeat(62), "0z");
+    assert!(matches!(
+        Address::parse_hex(&even_bad),
+        Err(aperture_cas::CasError::BadAddress { .. })
+    ));
+}
+
+#[test]
+fn a_target_blocked_by_a_directory_is_an_error_not_silent() {
+    // If something occupies the asset's final path with a *directory*, the
+    // rename fails, the staged copy is removed, and the error propagates —
+    // nothing is silently dropped.
+    let (_dir, store) = tmp_store("blocked");
+    let data = b"blocked payload";
+    let addr = hash_bytes(data);
+    let target = store.path(&addr);
+    std::fs::create_dir_all(&target).expect("create blocking dir");
+    let err = store.put_bytes(data).expect_err("fails");
+    assert!(!err.to_string().is_empty());
+    // Staged copy cleaned up: the objects root holds only the blocking dir.
+    let strays: Vec<_> = std::fs::read_dir(target.parent().expect("parent"))
+        .expect("read")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.ends_with(".tmp-"))
+                .unwrap_or(false)
+                || e.file_name()
+                    .to_str()
+                    .map(|n| n.contains(".tmp-"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    assert!(strays.is_empty(), "no staged leftovers: {strays:?}");
+}
+
+#[test]
+fn stream_ingest_reports_errors_when_its_target_is_blocked() {
+    let (_dir, store) = tmp_store("stream-blocked");
+    let data = b"stream payload".repeat(10);
+    let addr = hash_bytes(&data);
+    let target = store.path(&addr);
+    std::fs::create_dir_all(&target).expect("create blocking dir");
+    assert!(store.put_stream(Cursor::new(&data)).is_err());
+}
+
+#[test]
+fn reads_through_a_blocked_target_report_io_errors() {
+    // When the object path is occupied by a directory, every read path
+    // reports a non-Missing io error — the caller must be able to tell
+    // "absent" from "blocked".
+    let (_dir, store) = tmp_store("io-arm");
+    let addr = Address::parse_hex(&"77".repeat(32)).expect("valid");
+    let target = store.path(&addr);
+    std::fs::create_dir_all(&target).expect("create blocking dir");
+    assert!(matches!(
+        store.get_bytes(&addr),
+        Err(aperture_cas::CasError::Io(_))
+    ));
+    // `File::open` on a directory succeeds on Linux; the read is where the
+    // error surfaces — which `verify` (streaming hash) hits.
+    assert!(store.verify(&addr).is_err());
+}
+
+#[test]
+fn the_sweeper_ignores_non_staging_entries() {
+    let (_dir, store) = tmp_store("sweep-skip");
+    let (addr, _) = store.put_bytes(b"kept").expect("put");
+    // A stray plain file in the objects root is not staging state: the
+    // sweeper leaves it for whatever put it there.
+    let stray = store.root().join("objects/not-staging.txt");
+    std::fs::write(&stray, b"someone else's file").expect("write");
+    let removed = store.sweep(0).expect("sweep");
+    assert_eq!(removed, 0, "non-staging entries are never swept");
+    assert!(stray.exists());
+    assert!(store.has(&addr));
+}
