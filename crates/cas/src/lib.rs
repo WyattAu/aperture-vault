@@ -261,18 +261,30 @@ impl Store {
         ));
         let mut file = fs::File::create(&staged)?;
         let mut total = 0u64;
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
+        // A reader failure must not leave the staged file behind: the bytes on
+        // disk are partial, addressable by nothing, and the sweeper is for
+        // *crashes*, not for errors the caller is right here to see.
+        let outcome = (|| -> Result<u64, CasError> {
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let filled = buf.get(..n).unwrap_or(&buf);
+                hasher.update(filled);
+                file.write_all(filled)?;
+                total += n as u64;
             }
-            let filled = buf.get(..n).unwrap_or(&buf);
-            hasher.update(filled);
-            file.write_all(filled)?;
-            total += n as u64;
-        }
-        file.flush()?;
-        drop(file);
+            file.flush()?;
+            Ok(total)
+        })();
+        let total = match outcome {
+            Ok(total) => total,
+            Err(e) => {
+                let _ = fs::remove_file(&staged);
+                return Err(e);
+            }
+        };
         let address = Address::new(*hasher.finalize().as_bytes());
         let target = self.path(&address);
         if let Some(parent) = target.parent() {
@@ -402,4 +414,87 @@ pub struct Ingested {
     pub newly_written: bool,
     /// The stream's length in bytes, hashed along the way.
     pub len: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn address_debug_and_display_render_hex() {
+        let addr = hash_bytes(b"fmt");
+        let hex = addr.hex();
+        assert_eq!(format!("{addr}"), hex);
+        assert!(format!("{addr:?}").contains(&hex));
+    }
+
+    #[test]
+    fn hash_reader_hashes_a_cursor_without_touching_the_disk() {
+        let data = b"reader hashing";
+        let (addr, len) = hash_reader(Cursor::new(data.as_slice())).expect("hashes");
+        assert_eq!(addr, hash_bytes(data));
+        assert_eq!(len, data.len() as u64);
+    }
+
+    /// A reader that yields some bytes, then fails — the ingest error path.
+    struct FailingAfter {
+        data: Vec<u8>,
+        pos: usize,
+        fail_at: usize,
+    }
+
+    impl Read for FailingAfter {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.fail_at {
+                return Err(io::Error::other("injected failure"));
+            }
+            let n = buf
+                .len()
+                .min(self.data.len().saturating_sub(self.pos))
+                .min(self.fail_at - self.pos);
+            let src = self.data.get(self.pos..self.pos + n).unwrap_or(&[]);
+            buf.get_mut(..n).unwrap_or(&mut []).copy_from_slice(src);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_failing_stream_is_an_error_not_a_partial_asset() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(dir.path().join("vault")).expect("opens");
+        let reader = FailingAfter {
+            data: vec![7u8; 1000],
+            pos: 0,
+            fail_at: 400,
+        };
+        let err = store.put_stream(reader).expect_err("fails");
+        assert!(err.to_string().contains("injected failure"));
+        // And the staging file is cleaned up: no orphan left behind.
+        let orphans: Vec<_> = std::fs::read_dir(dir.path().join("vault").join("objects"))
+            .expect("read objects")
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with(".ingest-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(orphans.is_empty(), "no orphaned staging files: {orphans:?}");
+    }
+
+    #[test]
+    fn open_read_reports_missing_by_kind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(dir.path().join("vault")).expect("opens");
+        let absent = Address::new([9u8; 32]);
+        match store.open_read(&absent) {
+            Err(CasError::Missing { address }) => assert_eq!(address, absent),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
 }
