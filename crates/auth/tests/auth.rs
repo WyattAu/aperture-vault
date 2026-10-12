@@ -1,6 +1,12 @@
 //! End-to-end auth flows against a real file registry and real token
 //! service: register, log in, session round trip, share round trip, and the
 //! boundary cases that matter (wrong password, session-as-share, expiry).
+//!
+//! Fixtures are allowed to assert: an `expect` here is the test stating what
+//! it assumes, the honest form, and the crate lint denies it everywhere a
+//! caller would write it.
+
+#![allow(clippy::expect_used)]
 
 use aperture_auth::{Auth, UserStore};
 
