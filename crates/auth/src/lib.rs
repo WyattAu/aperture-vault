@@ -1,11 +1,10 @@
 //! Multi-user authentication for the Aperture vault.
 //!
 //! Built on the estate's published `salting` (Argon2 password verifiers,
-//! per-user salts, strength policy) and `tokenkit` (JWT sessions and
-//! capability tokens) crates — the same auth substrate
-//! `estate-integration` verifies interoperate. The vault's auth decisions are
-//! therefore exercised by proofs and audits that already exist, rather than
-//! re-implemented here.
+//! per-user salts) and `tokenkit` (JWT sessions and capability tokens)
+//! crates — the same auth substrate `estate-integration` verifies
+//! interoperate. The vault's auth decisions are therefore exercised by
+//! proofs and audits that already exist, rather than re-implemented here.
 //!
 //! # What this module decides
 //!
@@ -20,18 +19,30 @@
 //!
 //! The two token kinds are separated by the `role` claim, and each validator
 //! refuses the other kind — a share link must never authenticate as a user.
+//!
+//! # What this module deliberately does not do
+//!
+//! - **No network.** The HTTP layer maps these decisions onto requests.
+//! - **No password complexity policy.** Length is the property that actually
+//!   resists offline guessing (`MIN_PASSWORD_LENGTH`); character-class
+//!   theatre is not implemented, and this is a decision, not an omission.
 
-/// Password policy: length first. Complexity theatre is not a policy.
-#[must_use]
-/// The minimum accepted password length. Complexity theatre is not a policy:
-/// length is the property that actually resists offline guessing.
+pub mod service;
+pub mod users;
+
+pub use service::{Auth, ISSUER};
+pub use users::UserStore;
+
+/// The minimum accepted password length. Length is the property that
+/// actually resists offline guessing; character-class theatre is not a
+/// policy, and this is a decision, not an omission.
 pub const MIN_PASSWORD_LENGTH: usize = 8;
 
 /// Validate a password against the vault's policy.
 ///
 /// # Errors
 ///
-/// The policy's own error, verbatim — its message is the user-facing one.
+/// [`AuthError::WeakPassword`] with the user-facing message.
 pub fn check_password(password: &str) -> Result<(), AuthError> {
     if password.len() < MIN_PASSWORD_LENGTH {
         return Err(AuthError::WeakPassword(format!(
@@ -40,12 +51,6 @@ pub fn check_password(password: &str) -> Result<(), AuthError> {
     }
     Ok(())
 }
-
-pub mod service;
-pub mod users;
-
-pub use service::{Auth, ISSUER};
-pub use users::UserStore;
 
 /// Errors from the auth layer.
 #[derive(Debug, thiserror::Error)]
@@ -73,17 +78,4 @@ pub enum AuthError {
     /// Token issuance or validation failed.
     #[error("token: {0}")]
     Token(String),
-}
-
-/// One registered user.
-#[derive(Debug, Clone, PartialEq)]
-pub struct User {
-    /// Stable identifier (random hex), the JWT `sub`.
-    pub id: String,
-    /// Login name, unique.
-    pub username: String,
-    /// Display name.
-    pub display_name: String,
-    /// Argon2 verifier in PHC format (salt embedded).
-    pub password_hash: String,
 }
