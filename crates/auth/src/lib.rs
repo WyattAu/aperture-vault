@@ -31,12 +31,25 @@ pub mod service;
 pub mod users;
 
 pub use service::{Auth, ISSUER};
-pub use users::UserStore;
+pub use users::{User, UserStore};
 
 /// The minimum accepted password length. Length is the property that
 /// actually resists offline guessing; character-class theatre is not a
 /// policy, and this is a decision, not an omission.
 pub const MIN_PASSWORD_LENGTH: usize = 8;
+
+/// One registered user.
+#[derive(Debug, Clone, PartialEq)]
+pub struct User {
+    /// Stable identifier (random hex), the JWT `sub`.
+    pub id: String,
+    /// Login name, unique.
+    pub username: String,
+    /// Display name.
+    pub display_name: String,
+    /// Argon2 verifier in PHC format (salt embedded).
+    pub password_hash: String,
+}
 
 /// Validate a password against the vault's policy.
 ///
