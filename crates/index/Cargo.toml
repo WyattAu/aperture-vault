@@ -1,0 +1,30 @@
+[package]
+name = "aperture-index"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "SQLite-backed asset index for the Aperture vault — timeline queries, albums, dedup-aware records"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/aperture-vault"
+keywords = ["sqlite", "index", "timeline", "photos"]
+categories = ["database-implementations"]
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[package.metadata.layers]
+tier = "L1"
