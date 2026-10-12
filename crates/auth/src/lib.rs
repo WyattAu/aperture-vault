@@ -31,7 +31,7 @@ pub mod service;
 pub mod users;
 
 pub use service::{Auth, ISSUER};
-pub use users::{User, UserStore};
+pub use users::UserStore;
 
 /// The minimum accepted password length. Length is the property that
 /// actually resists offline guessing; character-class theatre is not a
