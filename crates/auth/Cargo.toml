@@ -1,0 +1,34 @@
+[package]
+name = "aperture-auth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Multi-user authentication for the Aperture vault — salted password verifiers, session JWTs, and share-link capability tokens on estate salting + tokenkit"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/aperture-vault"
+keywords = ["auth", "sessions", "jwt", "share-links", "vault"]
+categories = ["authentication"]
+
+[dependencies]
+salting = "=2.0.0"
+tokenkit = { version = "=0.4.1", features = ["revocation", "rotation"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[package.metadata.layers]
+tier = "L1"
