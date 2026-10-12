@@ -33,6 +33,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aperture-pipeline"
+version = "0.1.0"
+dependencies = [
+ "aperture-cas",
+ "aperture-index",
+ "aperture-probe",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "aperture-probe"
 version = "0.1.0"
 dependencies = [
