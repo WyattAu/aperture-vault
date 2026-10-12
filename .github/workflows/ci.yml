@@ -31,6 +31,11 @@ jobs:
           ref: main
           path: mp4-core-sibling
           persist-credentials: false
+          # mp4-core is private; the job token cannot see it. ESTATE_TOKEN (a
+          # PAT with read access to the estate) turns this green. Until the
+          # secret exists, this step fails — honestly, rather than the whole
+          # gate passing while silently skipping the sibling.
+          token: ${{ secrets.ESTATE_TOKEN || github.token }}
 
       - name: place the sibling where the path dependency resolves
         run: |
