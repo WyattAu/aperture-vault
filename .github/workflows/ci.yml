@@ -24,13 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: checkout the mp4-core sibling the path dependencies name
+      - name: checkout the mp4-core sibling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: WyattAu/mp4-core
           ref: main
-          path: ../mp4-core
+          path: mp4-core-sibling
           persist-credentials: false
+
+      - name: place the sibling where the path dependency resolves
+        run: |
+          # crates/probe -> ../../../mp4-core resolves one level above this
+          # repository; actions/checkout cannot write there, so the checked-out
+          # sibling is symlinked into place.
+          ln -s "$GITHUB_WORKSPACE/mp4-core-sibling" "$(dirname "$GITHUB_WORKSPACE")/mp4-core"
+          ls -la "$(dirname "$GITHUB_WORKSPACE")"
 
       - name: install the toolchain
         run: |
