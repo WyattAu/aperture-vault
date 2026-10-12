@@ -1,3 +1,9 @@
+# Bespoke CI: this workspace's crates reference estate siblings by relative
+# path (crates/probe -> ../../../mp4-core), so the shared rust-kit reusable
+# workflow — which checks out one repository — cannot resolve them. This
+# workflow checks out the sibling one level above the repository, the same
+# shape a local clone has, then runs the same gates.
+
 name: CI
 
 on:
@@ -13,7 +19,39 @@ concurrency:
 
 jobs:
   quality:
-    uses: WyattAu/engineering-standards/.github/workflows/rust-kit.yml@main
-    with:
-      tier: a
-      all-features: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: checkout the mp4-core sibling the path dependencies name
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: WyattAu/mp4-core
+          ref: main
+          path: ../mp4-core
+          persist-credentials: false
+
+      - name: install the toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
+            --location --silent --show-error --fail https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-features
+
+      - name: feature gates
+        run: |
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused \
+            --location --silent --show-error --fail \
+            https://raw.githubusercontent.com/WyattAu/engineering-standards/main/scripts/check-features.py \
+            -o check-features.py
+          python3 check-features.py --cwd .
