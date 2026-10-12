@@ -2,8 +2,7 @@
 //! service: register, log in, session round trip, share round trip, and the
 //! boundary cases that matter (wrong password, session-as-share, expiry).
 
-use aperture_auth::{Auth, User, UserStore};
-use salting::Pepper;
+use aperture_auth::{Auth, UserStore};
 
 fn registry() -> (tempfile::TempDir, UserStore) {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -96,12 +95,6 @@ fn the_user_registry_survives_reopen() {
         .verify_login("wyatt", "correct horse battery")
         .expect("verifies after reopen");
     assert_eq!(user.username, "wyatt");
-}
-
-fn register_user(store: &mut UserStore, username: &str) -> aperture_auth::User {
-    store
-        .create_user(username, "correct horse battery", username)
-        .expect("registers")
 }
 
 #[test]
