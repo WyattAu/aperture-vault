@@ -1,0 +1,37 @@
+[package]
+name = "aperture-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Asset metadata probe for the Aperture vault — JPEG/EXIF and PNG headers parsed from bytes, MP4 via estate mp4-core; no_std + alloc"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/aperture-vault"
+keywords = ["exif", "jpeg", "metadata", "photos", "no-std"]
+categories = ["multimedia::images", "parser-implementations", "no-std"]
+exclude = [".github/"]
+
+[dependencies]
+# Estate L0: MP4 containers (video probe).
+mp4-core = { version = "0.3", path = "../../../mp4-core" }
+thiserror = { version = "2", default-features = false }
+
+[features]
+default = []
+# `std` unlocks std::error::Error and richer io errors. The parsers are
+# no_std + alloc either way.
+std = []
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[package.metadata.layers]
+tier = "L0"
