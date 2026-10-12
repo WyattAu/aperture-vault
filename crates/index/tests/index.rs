@@ -1,8 +1,12 @@
 //! The index exercised through its public surface: record, dedup, timeline
 //! order, pagination, and the no-metadata fallback ordering.
 
+// Fixtures are allowed to assert: an `expect` here is the test stating what it
+// assumes, the honest form, and the crate lint denies it everywhere a caller
+// would write it.
+#![allow(clippy::expect_used)]
+
 use aperture_index::{Index, Recorded};
-use std::path::Path;
 
 fn file_index() -> (tempfile::TempDir, Index) {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -129,5 +133,7 @@ fn an_index_on_disk_survives_reopen() {
     }
     let reopened = Index::open(&path).expect("reopens");
     assert_eq!(reopened.count().expect("count"), 1);
-    assert!(Path::new(&dir.path().join("index.db-wal")).exists() == false || true);
+    // WAL mode leaves a -wal sidecar beside the database; its presence or
+    // absence after a clean close is not asserted — only that the data
+    // survived the reopen, which is the property that matters.
 }
