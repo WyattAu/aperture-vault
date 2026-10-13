@@ -19,6 +19,8 @@ use axum::response::IntoResponse as _;
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod immich;
+
 /// The shared application state, cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
@@ -139,51 +141,22 @@ type ApiResult = Result<axum::response::Response, ApiError>;
 /// Build the application router.
 pub fn build_router(state: AppState) -> axum::Router {
     use axum::routing::{get, post};
-    axum::Router::new()
-        .route("/api/auth/login", post(login))
+    // Login is served by the Immich module: its `{email, password}` shape is
+    // the one the Immich mobile apps speak, and `username` is accepted as an
+    // alias for native clients. One endpoint, one truth.
+    let native = axum::Router::new()
         .route("/api/timeline", get(timeline))
-        .route("/api/assets", post(upload))
+        .route("/api/assets", post(upload_dispatch))
         .route("/api/assets/{address}", get(asset_bytes))
-        .with_state(state)
-}
-
-#[derive(serde::Deserialize)]
-struct LoginRequest {
-    username: String,
-    password: String,
-}
-
-#[axum::debug_handler]
-async fn login(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    body: String,
-) -> ApiResult {
-    let req: LoginRequest =
-        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
-    let user = state
-        .users
-        .lock()
-        .map_err(|_| ApiError::Internal)?
-        .verify_login(&req.username, &req.password)
-        .map_err(|_| ApiError::Unauthorized)?;
-    let token = state
-        .auth
-        .issue_session(&user)
-        .map_err(|_| ApiError::Internal)?;
-    let body = serde_json::to_vec(&serde_json::json!({
-        "token": token,
-        "userId": user.id,
-    }))
-    .map_err(|_| ApiError::Internal)?;
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response())
+        .with_state(state.clone());
+    native.merge(crate::immich::immich_router(state))
 }
 
 /// Extract and validate the bearer token, returning the user id.
-fn require_user(state: &AppState, headers: &axum::http::HeaderMap) -> Result<String, ApiError> {
+pub(crate) fn require_user(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, ApiError> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -220,6 +193,38 @@ async fn timeline(
 struct UploadParams {
     filename: Option<String>,
 }
+
+/// `POST /api/assets` — one URL, two client encodings. Immich mobile apps
+/// speak multipart with an `assetData` field; native clients send raw bytes
+/// with a `?filename=` query. The dispatcher branches on Content-Type so
+/// each client keeps its exact contract, and there is exactly one upload
+/// route to reason about.
+async fn upload_dispatch(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    params: axum::extract::Query<UploadParams>,
+    request: axum::extract::Request,
+) -> ApiResult {
+    let is_multipart = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("multipart/form-data"));
+    if is_multipart {
+        use axum::extract::FromRequest as _;
+        let multipart = axum::extract::Multipart::from_request(request, &state)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("multipart: {e}")))?;
+        return crate::immich::upload_asset_multipart(state, headers, multipart).await;
+    }
+    let body = axum::body::to_bytes(request.into_body(), MAX_UPLOAD_BYTES)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("body: {e}")))?;
+    upload(axum::extract::State(state), headers, params, body).await
+}
+
+/// An upper bound on a single upload: 4 GiB, generous for a photo vault and
+/// a deliberate refusal to let a client stream forever.
+const MAX_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 async fn upload(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -273,11 +278,16 @@ async fn asset_bytes(
     Ok(response)
 }
 
+/// Parse an asset id into its content address.
+pub(crate) fn cas_address(id: &str) -> Result<aperture_cas::Address, ApiError> {
+    aperture_cas::Address::parse_hex(id).map_err(|e| ApiError::BadRequest(e.to_string()))
+}
+
 /// Sniff the content type from the leading bytes: photos and videos are
 /// identified by magic, not by the name the uploader chose. Unrecognised
 /// content is served as `application/octet-stream` — served, not refused,
 /// because the vault stores what was uploaded.
-fn mime_for(data: &[u8]) -> &'static str {
+pub(crate) fn mime_for(data: &[u8]) -> &'static str {
     match (data.first(), data.get(1), data.get(2), data.get(3)) {
         (Some(0xFF), Some(0xD8), _, _) => "image/jpeg",
         (Some(0x89), Some(0x50), Some(0x4E), Some(0x47)) => "image/png",

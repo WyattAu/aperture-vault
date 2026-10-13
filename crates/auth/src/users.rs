@@ -114,6 +114,17 @@ impl UserStore {
         })
     }
 
+    /// Look a user up by stable id (the JWT `sub`).
+    #[must_use]
+    pub fn user_by_id(&self, id: &str) -> Option<User> {
+        self.users.values().find(|u| u.id == id).map(|stored| User {
+            id: stored.id.clone(),
+            username: stored.username.clone(),
+            display_name: stored.display_name.clone(),
+            password_hash: stored.password_hash.clone(),
+        })
+    }
+
     fn persist(&self) -> Result<(), AuthError> {
         let text = serde_json::to_string_pretty(&self.users)
             .map_err(|e| AuthError::Store(format!("serialize: {e}")))?;

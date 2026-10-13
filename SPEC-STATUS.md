@@ -1,4 +1,4 @@
-# Status — after the first estate-dogfooding arc (2026-10-12)
+# Status — after the Immich-API milestone (2026-10-13)
 
 ## Shipped
 
@@ -15,6 +15,18 @@
   tokenkit), account-enumeration defence, minimum-length password policy.
   `aperture-pipeline` — the ingest junction: hash-while-stream → dedup
   short-circuit → probe what survived → index what probed.
+- **M3** Immich-compatible API in `aperture-server` — the protocol the
+  existing Immich mobile apps speak, so clients attach unchanged:
+  `POST /api/auth/login` (`{email, password}` → `{accessToken, userId}`,
+  `username` accepted as an alias — one login endpoint serves both client
+  generations), `POST /api/auth/validateToken`, `GET /api/users/me` (full
+  profile via the new `UserStore::user_by_id`), multipart `assetData`
+  upload, and `GET /api/assets/{id}/original`. One upload URL serves both
+  encodings: a dispatcher branches on Content-Type, handing multipart
+  bodies to the Immich path and raw bytes + `?filename=` to the native
+  path, so each client keeps its exact contract at the same endpoint.
+  Asset ids are content addresses, not UUIDs — clients treat ids as
+  opaque strings, and an id that lies about identity would be a defect.
 
 ## Dogfood used
 

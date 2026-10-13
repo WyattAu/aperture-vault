@@ -99,7 +99,7 @@ async fn login_rejects_bad_credentials_with_401() {
         "POST",
         "/api/auth/login",
         None,
-        Some(br#"{"username":"wyatt","password":"wrong"}"#.to_vec()),
+        Some(br#"{"email":"wyatt","password":"wrong"}"#.to_vec()),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -113,11 +113,14 @@ async fn login_accepts_good_credentials_and_returns_a_token() {
         "POST",
         "/api/auth/login",
         None,
-        Some(br#"{"username":"wyatt","password":"correct horse battery"}"#.to_vec()),
+        Some(br#"{"email":"wyatt","password":"correct horse battery"}"#.to_vec()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(json["token"].as_str().is_some(), "a token is returned");
+    assert!(
+        json["accessToken"].as_str().is_some(),
+        "a token is returned"
+    );
     assert!(json["userId"].as_str().is_some());
 }
 
