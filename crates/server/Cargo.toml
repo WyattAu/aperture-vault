@@ -1,0 +1,42 @@
+[package]
+name = "aperture-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "The Aperture vault HTTP server — auth, upload, timeline, asset delivery over cas + probe + index + pipeline"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/WyattAu/aperture-vault"
+keywords = ["axum", "http", "server", "photos"]
+
+[dependencies]
+aperture-auth = { version = "0.1", path = "../auth" }
+aperture-cas = { version = "0.1", path = "../cas" }
+aperture-index = { version = "0.1", path = "../index" }
+aperture-pipeline = { version = "0.1", path = "../pipeline" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[package.metadata.layers]
+tier = "L3"
+
+[[bin]]
+name = "aperture-server"
+path = "src/main.rs"

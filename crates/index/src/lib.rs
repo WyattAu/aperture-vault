@@ -52,7 +52,7 @@ pub struct AssetRecord {
 }
 
 /// One timeline entry: the address, its capture day, and display time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TimelineEntry {
     /// Content address.
     pub address: String,
