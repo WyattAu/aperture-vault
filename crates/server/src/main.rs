@@ -1,4 +1,10 @@
-//! The Aperture vault server binary: bind, serve, and stop gracefully.
+//! The vault server binary: bind, serve, and stop gracefully.
+//!
+//! A binary that refuses to start on a bad configuration is honest; the
+//! `expect`s here are that refusal, and the crate lint denies them for
+//! library code where they would be silent failure modes.
+
+#![allow(clippy::expect_used)]
 
 use std::path::PathBuf;
 
