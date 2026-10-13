@@ -28,6 +28,18 @@
   Asset ids are content addresses, not UUIDs — clients treat ids as
   opaque strings, and an id that lies about identity would be a defect.
 
+- **M4** Thumbnails in `aperture-pipeline::thumb` + the Immich route
+  `GET /api/assets/{id}/thumbnail?size=thumbnail|preview`. Generation is
+  **synchronous on-demand with a deterministic cache** — a deliberate
+  refusal of a job queue: a 250 px JPEG resize costs tens of milliseconds,
+  and a queue would add a worker, a table, and retry semantics to defer
+  work that is already instant. The derived blob is a CAS object in its
+  own right (dedup, integrity, GC all follow); the index's new `derived`
+  table maps `(source, spec)` to the derived address, so the cost is paid
+  once per asset per size, forever. Longest edge bounded (250/1440 px),
+  aspect preserved, small originals never upscaled, non-images answered
+  with the 404 that is literally true. Blurhash is an honest not-yet.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
@@ -44,6 +56,8 @@ estate CI gate, `salting` + `tokenkit` from crates.io (the same pins
    decision above this repository.
 2. **Auth is session+share only** — no OAuth, no email flows. The JWT
    substrate makes adding them mechanical.
-3. **Thumbnails/transcodes** (M4) are unimplemented; derived assets are
+3. **Thumbnails** (M4) ship for stills; **video poster frames and
+   transcodes** are the honest future case for worker-kit — a queue earns
+   its weight when generation is slow, and video is. Derived stills are
    already addressable CAS blobs, so the storage needs no migration.
 4. **uring-kit** substrate (M5) unimplemented; std I/O today.

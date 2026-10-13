@@ -135,7 +135,6 @@ impl Index {
     }
 
     /// The timeline, newest first, paginated.
-    ///
     /// Capture time falls back to a sentinel epoch when EXIF is absent, so
     /// assets without metadata still appear — ordered by *ingest recency*
     /// among themselves, via the rowid tiebreaker.
@@ -197,6 +196,46 @@ impl Index {
         }
     }
 
+    /// Record a derived asset — the mapping from (source asset, spec) to the
+    /// derived blob's address. Re-recording the same pair overwrites, so a
+    /// regenerated thumbnail replaces its predecessor atomically.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn record_derived(
+        &self,
+        source: &str,
+        spec: &str,
+        address: &str,
+    ) -> Result<(), IndexError> {
+        self.conn.execute(
+            "INSERT INTO derived (source, spec, address) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source, spec) DO UPDATE SET address = excluded.address",
+            rusqlite::params![source, spec, address],
+        )?;
+        Ok(())
+    }
+
+    /// The address of a derived asset, when one has been generated.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn derived(&self, source: &str, spec: &str) -> Result<Option<String>, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT address FROM derived WHERE source = ?1 AND spec = ?2",
+                rusqlite::params![source, spec],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other.into()),
+            })
+    }
+
     /// How many assets the index knows.
     ///
     /// # Errors
@@ -225,6 +264,17 @@ CREATE TABLE IF NOT EXISTS assets (
     file_name  TEXT
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
+
+-- Derived assets: thumbnails and future transcodes. The CAS stores every
+-- blob by its own content address; this table is the mapping from
+-- (source asset, derived spec) to the derived blob's address, so the same
+-- thumbnail is generated once and then read from storage forever.
+CREATE TABLE IF NOT EXISTS derived (
+    source  TEXT NOT NULL,
+    spec    TEXT NOT NULL,
+    address TEXT NOT NULL,
+    PRIMARY KEY (source, spec)
+);
 ";
 
 /// Errors from the index.

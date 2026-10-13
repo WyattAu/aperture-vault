@@ -106,4 +106,10 @@ pub enum PipelineError {
     /// The index write failed.
     #[error("index: {0}")]
     Index(#[from] aperture_index::IndexError),
+    /// The original is not a decodable still image — a video, or corrupt
+    /// bytes. A thumbnail of it does not exist.
+    #[error("not a decodable still image")]
+    NotAnImage,
 }
+
+pub mod thumb;

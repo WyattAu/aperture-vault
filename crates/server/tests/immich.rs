@@ -191,3 +191,123 @@ fn multipart_body(boundary: &str, filename: &str, data: &[u8]) -> Vec<u8> {
     out.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     out
 }
+
+/// A genuinely decodable PNG, for the thumbnail tests — the `png_bytes`
+/// fixture above is magic bytes plus junk, which is exactly what a
+/// thumbnail endpoint must refuse.
+fn real_png(width: u32, height: u32) -> Vec<u8> {
+    let img = image::DynamicImage::new_rgb8(width, height);
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encodes");
+    png
+}
+
+async fn upload_bytes(
+    router: &mut axum::Router,
+    token: &str,
+    filename: &str,
+    data: &[u8],
+) -> String {
+    let boundary = "testboundary123";
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/assets")
+        .header("Authorization", format!("Bearer {token}"))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(multipart_body(boundary, filename, data)))
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    json["id"].as_str().expect("id").to_string()
+}
+
+#[tokio::test]
+async fn immich_thumbnail_serves_a_derived_still() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let address = upload_bytes(&mut router, &token, "shot.png", &real_png(1600, 900)).await;
+
+    let uri = format!("/api/assets/{address}/thumbnail?size=preview");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content type")
+        .to_string();
+    assert_eq!(content_type, "image/jpeg");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+    assert_eq!(&bytes[0..2], b"\xFF\xD8", "a real JPEG");
+
+    // The second request is served from the cache — same bytes, no decode.
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    let again = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+    assert_eq!(again, bytes, "cache hit reproduces the exact blob");
+}
+
+#[tokio::test]
+async fn immich_thumbnail_defaults_to_the_small_size_and_refuses_unknown_ones() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let address = upload_bytes(&mut router, &token, "shot.png", &real_png(800, 600)).await;
+
+    // No ?size= means thumbnail — the default Immich asks for first.
+    let uri = format!("/api/assets/{address}/thumbnail");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Blurhash is an Immich feature this vault honestly does not have yet.
+    let uri = format!("/api/assets/{address}/thumbnail?size=blurhash");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn immich_thumbnail_of_a_non_image_is_a_404() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    // The fake `png_bytes` fixture: magic header, junk body — not decodable.
+    let address = upload_bytes(&mut router, &token, "fake.png", &png_bytes()).await;
+
+    let uri = format!("/api/assets/{address}/thumbnail");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

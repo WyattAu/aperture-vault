@@ -8,6 +8,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use std::sync::Arc;
 
 type ApiResult = Result<Response, ApiError>;
 
@@ -159,6 +160,53 @@ pub async fn original(
     Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response())
 }
 
+/// The `?size=` query the Immich apps send.
+#[derive(Debug, serde::Deserialize)]
+pub struct ThumbQuery {
+    /// `thumbnail` (default) or `preview`.
+    pub size: Option<String>,
+}
+
+/// `GET /api/assets/:id/thumbnail` — the derived still a grid displays.
+/// Generated on demand and cached as a CAS blob, so the cost is paid once
+/// per asset per size. The decode runs on the blocking pool: it is real
+/// CPU work, not a pretend-async stub.
+pub async fn thumbnail(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ThumbQuery>,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let size = match query.size.as_deref() {
+        None | Some("thumbnail") => aperture_pipeline::thumb::ThumbSize::Thumbnail,
+        Some("preview") => aperture_pipeline::thumb::ThumbSize::Preview,
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown thumbnail size {other}; thumbnail and preview are the ones that exist"
+            )));
+        }
+    };
+    let addr = crate::cas_address(&id)?;
+    let store = Arc::clone(&state.store);
+    let index = Arc::clone(&state.index);
+    let derived = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+        let guard = index.lock().map_err(|_| ApiError::Internal)?;
+        aperture_pipeline::thumb::thumbnail(&store, &guard, &addr, size).map_err(|e| match e {
+            aperture_pipeline::PipelineError::NotAnImage => ApiError::NotFound,
+            _ => ApiError::Internal,
+        })
+    })
+    .await
+    .map_err(|_| ApiError::Internal)??;
+    let thumb = derived;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "image/jpeg")],
+        thumb.bytes,
+    )
+        .into_response())
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
@@ -169,5 +217,6 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/auth/validateToken", post(validate_token))
         .route("/api/users/me", get(users_me))
         .route("/api/assets/{id}/original", get(original))
+        .route("/api/assets/{id}/thumbnail", get(thumbnail))
         .with_state(state)
 }
