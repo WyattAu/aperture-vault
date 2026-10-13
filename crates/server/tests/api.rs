@@ -6,7 +6,7 @@
 //! it assumes, the honest form, and the workspace lint denies it everywhere a
 //! caller would write it.
 
-#![allow(clippy::expect_used, clippy::indexing_slicing)]
+#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
