@@ -268,7 +268,7 @@ async fn asset_bytes(
         .map_err(|_| ApiError::Internal)?;
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        "private, max-age=31536000".parse().unwrap(),
+        axum::http::HeaderValue::from_static("private, max-age=31536000"),
     );
     Ok(response)
 }
