@@ -40,7 +40,7 @@ impl AppState {
     /// A string describing the failure — the server cannot start.
     pub fn new(vault_root: &Path) -> Result<Self, String> {
         let store =
-            Store::open(&vault_root.join("objects-root")).map_err(|e| format!("store: {e}"))?;
+            Store::open(vault_root.join("objects-root")).map_err(|e| format!("store: {e}"))?;
         let index = Index::open(&vault_root.join("index.db")).map_err(|e| format!("index: {e}"))?;
         let users =
             UserStore::open(&vault_root.join("users.json")).map_err(|e| format!("users: {e}"))?;
@@ -137,7 +137,6 @@ impl axum::response::IntoResponse for ApiError {
 type ApiResult = Result<axum::response::Response, ApiError>;
 
 /// Build the application router.
-#[must_use]
 pub fn build_router(state: AppState) -> axum::Router {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -260,7 +259,7 @@ async fn asset_bytes(
     let addr = Address::parse_hex(&address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let bytes = state.store.get_bytes(&addr).map_err(|e| match e {
         aperture_cas::CasError::Missing { .. } => ApiError::NotFound,
-        other => ApiError::Internal,
+        _other => ApiError::Internal,
     })?;
     let mime = mime_for(&bytes);
     let mut response = axum::response::Response::builder()
