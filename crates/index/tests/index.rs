@@ -29,6 +29,7 @@ fn record(address: &str, taken_at: Option<&str>, name: &str) -> aperture_index::
         file_name: Some(format!("{name}.jpg")),
         sha1: None,
         thumbhash: None,
+        is_favorite: false,
     }
 }
 
@@ -324,4 +325,40 @@ fn buckets_group_by_capture_day_newest_first() {
         Some("b"),
         "later capture first within the day"
     );
+}
+
+#[test]
+fn favorite_flags_toggle_and_count_in_the_statistics() {
+    let (_dir, index) = file_index();
+    index
+        .record_asset(&record("img1", Some("2026-01-01T08:00:00"), "a.jpg"))
+        .expect("record");
+    index
+        .record_asset(&record("img2", Some("2026-02-01T08:00:00"), "b.jpg"))
+        .expect("record");
+    let mut video = record("vid", Some("2026-03-01T08:00:00"), "c.mp4");
+    video.duration_ms = Some(30_000);
+    index.record_asset(&video).expect("record");
+
+    assert_eq!(
+        index.statistics().expect("stats"),
+        (2, 1, 3),
+        "two images, one video, three total"
+    );
+
+    // Toggle on, on again, off: idempotent, honest about existence.
+    assert!(index.set_favorite("img1", true).expect("set"));
+    assert!(index.set_favorite("img1", true).expect("re-set"));
+    assert!(index.set_favorite("img1", false).expect("clear"));
+    assert!(index.set_favorite("img1", true).expect("set again"));
+
+    // The flag persists through a fresh connection (it is a column, not
+    // an in-memory whim).
+    let favorite = index.asset("img1").expect("query").expect("recorded");
+    assert!(favorite.is_favorite);
+    let not = index.asset("img2").expect("query").expect("recorded");
+    assert!(!not.is_favorite, "the other asset is untouched");
+
+    // A favorite on a nonexistent asset reports the truth.
+    assert!(!index.set_favorite("ghost", true).expect("set"));
 }

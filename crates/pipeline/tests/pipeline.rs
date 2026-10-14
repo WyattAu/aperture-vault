@@ -122,6 +122,7 @@ fn the_index_is_rebuildable_from_the_cas_alone() {
                 file_name: None,
                 sha1: None,
                 thumbhash: None,
+                is_favorite: false,
             })
             .expect("record");
     }

@@ -120,6 +120,9 @@ pub struct AssetRecord {
     /// derived. `None` until then: the hash costs a decode, so it is paid
     /// on the same on-demand path as the thumbnail itself.
     pub thumbhash: Option<String>,
+    /// Whether the user starred the asset. A display flag the user owns —
+    /// never derived, never defaulted to true.
+    pub is_favorite: bool,
 }
 
 /// One timeline entry: the address, its capture day, and display time.
@@ -185,8 +188,8 @@ impl Index {
         let changed = self.conn.execute(
             "INSERT INTO assets
                (address, width, height, taken_at, make, model,
-                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(address) DO NOTHING",
             rusqlite::params![
                 r.address,
@@ -202,6 +205,7 @@ impl Index {
                 r.file_name,
                 r.sha1,
                 r.thumbhash,
+                i64::from(r.is_favorite),
             ],
         )?;
         Ok(if changed == 0 {
@@ -249,7 +253,7 @@ impl Index {
     pub fn asset(&self, address: &str) -> Result<Option<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
              FROM assets WHERE address = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address], |row| {
@@ -267,6 +271,7 @@ impl Index {
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
+                is_favorite: row.get::<_, i64>(13)? != 0,
             })
         })?;
         match rows.next() {
@@ -310,6 +315,40 @@ impl Index {
         Ok(())
     }
 
+    /// Set (or clear) an asset's favorite flag. Returns whether the asset
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn set_favorite(&self, address: &str, favorite: bool) -> Result<bool, IndexError> {
+        let changed = self.conn.execute(
+            "UPDATE assets SET is_favorite = ?2 WHERE address = ?1",
+            rusqlite::params![address, i64::from(favorite)],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Asset counts by kind — what the app's backup screen displays:
+    /// `(images, videos, total)`.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn statistics(&self) -> Result<(u64, u64, u64), IndexError> {
+        self.conn
+            .query_row(
+                "SELECT
+                    count(*) FILTER (WHERE duration_ms IS NULL),
+                    count(*) FILTER (WHERE duration_ms IS NOT NULL),
+                    count(*)
+                 FROM assets",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(IndexError::from)
+    }
+
     /// Capture-day buckets, newest first: `(day, count)`. The same day rule
     /// the timeline uses — EXIF `taken_at` when present, the 1970 sentinel
     /// grouping untagged assets by ingest order.
@@ -339,7 +378,7 @@ impl Index {
     pub fn assets_in_day(&self, day: &str) -> Result<Vec<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
              FROM assets
              WHERE COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
              ORDER BY substr(taken_at, 12, 8) DESC, address ASC",
@@ -359,6 +398,7 @@ impl Index {
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
+                is_favorite: row.get::<_, i64>(13)? != 0,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -499,7 +539,7 @@ impl Index {
             "SELECT assets.address, assets.width, assets.height, assets.taken_at,
                     assets.make, assets.model, assets.latitude, assets.longitude,
                     assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1,
-                    assets.thumbhash
+                    assets.thumbhash, assets.is_favorite
              FROM album_assets m
              JOIN assets ON assets.address = m.address
              WHERE m.album_id = ?1
@@ -520,6 +560,7 @@ impl Index {
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
+                is_favorite: row.get::<_, i64>(13)? != 0,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -760,7 +801,7 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash,
-                    CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
+                    is_favorite, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
              FROM assets
              WHERE taken_at IS NOT NULL
                AND substr(taken_at, 6, 2) = ?1
@@ -786,8 +827,9 @@ impl Index {
                     file_name: row.get(10)?,
                     sha1: row.get(11)?,
                     thumbhash: row.get(12)?,
+                    is_favorite: row.get::<_, i64>(13)? != 0,
                 },
-                row.get::<_, u32>(13)?,
+                row.get::<_, u32>(14)?,
             ))
         })?;
         let rows: Vec<(AssetRecord, u32)> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -821,6 +863,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
     let migrations: &[&str] = &[
         "ALTER TABLE assets ADD COLUMN sha1 TEXT",
         "ALTER TABLE assets ADD COLUMN thumbhash TEXT",
+        "ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
     ];
     for sql in migrations {
         let result = conn.execute_batch(sql);
@@ -853,7 +896,8 @@ CREATE TABLE IF NOT EXISTS assets (
     byte_len   INTEGER NOT NULL,
     file_name  TEXT,
     sha1       TEXT,
-    thumbhash  TEXT
+    thumbhash  TEXT,
+    is_favorite INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 

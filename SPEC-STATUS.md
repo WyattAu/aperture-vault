@@ -126,6 +126,13 @@
   assets without capture dates are never memories — a guess would be a
   lie with a timestamp. Pure index arithmetic; the EXIF had it all along.
 
+- **Favorite + statistics** — `PUT /api/assets/{id}` with the honest slice
+  of `UpdateAssetDto` (the favorite toggle; description/rating/visibility
+  refused by omission — accepted-and-ignored would lie), and `GET
+  /api/assets/statistics` (`{images, videos, total}`), the counts the
+  backup screen displays. Dogfooded on the release binary: star, detail
+  agreement, statistics.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

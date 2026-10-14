@@ -735,3 +735,77 @@ async fn memories_of_untagged_assets_are_empty_not_invented() {
         "an asset without a capture date is not a memory; a guess would be a lie with a timestamp"
     );
 }
+
+#[tokio::test]
+async fn favorite_toggles_and_statistics_count() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let a = upload_bytes(&mut router, &token, "a.png", &real_png(100, 100)).await;
+    let _b = upload_bytes(&mut router, &token, "b.png", &real_png(110, 90)).await;
+
+    let (status, stats) = send(
+        &mut router,
+        "GET",
+        "/api/assets/statistics",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["images"], 2);
+    assert_eq!(stats["videos"], 0);
+    assert_eq!(stats["total"], 2);
+
+    // Star one asset; the detail and the response agree.
+    let body = serde_json::json!({ "isFavorite": true }).to_string();
+    let (status, updated) = send(
+        &mut router,
+        "PUT",
+        &format!("/api/assets/{a}"),
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["isFavorite"], true);
+    let (_, detail) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{a}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(detail["isFavorite"], true);
+    let (_, other) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{_b}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(other["isFavorite"], false, "only the starred asset changed");
+
+    // A body with no supported field is refused, not silently ignored.
+    let (status, _) = send(
+        &mut router,
+        "PUT",
+        &format!("/api/assets/{a}"),
+        Some(&token),
+        Some(br#"{"rating":5}"#.to_vec()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Statistics on an empty vault would be zeros; here the starred one
+    // does not change counts.
+    let (_, stats) = send(
+        &mut router,
+        "GET",
+        "/api/assets/statistics",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(stats["total"], 2);
+}

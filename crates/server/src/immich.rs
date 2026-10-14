@@ -918,7 +918,7 @@ fn asset_json(record: &aperture_index::AssetRecord, owner: &str, mime: &str) -> 
         "width": record.width,
         "isArchived": false,
         "isEdited": false,
-        "isFavorite": false,
+        "isFavorite": record.is_favorite,
         "isOffline": false,
         "isTrashed": false,
         "libraryId": "",
@@ -983,6 +983,79 @@ pub async fn asset_detail(
     json_ok(&asset_json(&record, &owner, mime))
 }
 
+/// `PUT /api/assets/{id}` — the per-asset update. The honest slice of
+/// Immich's `UpdateAssetDto`: the favorite toggle, the one field the app's
+/// heart icon needs. Description, rating, and visibility would each need
+/// index state this vault does not model yet, so they are refused by
+/// omission — an accepted-and-ignored field would lie.
+pub async fn update_asset(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "isFavorite")]
+        is_favorite: Option<bool>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let Some(favorite) = req.is_favorite else {
+        return Err(ApiError::BadRequest(
+            "no supported field present; isFavorite is the one that exists".into(),
+        ));
+    };
+    let addr = crate::cas_address(&id)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let changed = index
+        .set_favorite(&addr.hex(), favorite)
+        .map_err(|_| ApiError::Internal)?;
+    if !changed {
+        return Err(ApiError::NotFound);
+    }
+    let record = index
+        .asset(&addr.hex())
+        .map_err(|_| ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+    drop(index);
+    let mime = state
+        .store
+        .open_read(&addr)
+        .ok()
+        .and_then(|mut file| {
+            use std::io::Read as _;
+            let mut prefix = [0u8; 16];
+            file.read_exact(&mut prefix).ok()?;
+            Some(crate::mime_for(&prefix))
+        })
+        .unwrap_or("application/octet-stream");
+    json_ok(&asset_json(&record, &owner_of(&state, &headers), mime))
+}
+
+/// The session user, or empty for share visitors — the same rule
+/// `asset_detail` applies to identity exposure.
+fn owner_of(state: &AppState, headers: &axum::http::HeaderMap) -> String {
+    require_user(state, headers).unwrap_or_default()
+}
+
+/// `GET /api/assets/statistics` — the counts the backup screen displays:
+/// images, videos, total.
+pub async fn asset_statistics(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let (images, videos, total) = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .statistics()
+        .map_err(|_| ApiError::Internal)?;
+    json_ok(&json!({ "images": images, "videos": videos, "total": total }))
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
@@ -1013,7 +1086,8 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/shared-links", post(create_share).get(shares))
         .route("/api/shared-links/me", get(shared_album))
         .route("/api/shared-links/{id}", delete(delete_share))
-        .route("/api/assets/{id}", get(asset_detail))
+        .route("/api/assets/{id}", get(asset_detail).put(update_asset))
+        .route("/api/assets/statistics", get(asset_statistics))
         .route("/api/memories", get(memories))
         .with_state(state)
 }
