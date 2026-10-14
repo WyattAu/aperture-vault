@@ -1056,6 +1056,77 @@ pub async fn asset_statistics(
     json_ok(&json!({ "images": images, "videos": videos, "total": total }))
 }
 
+/// `POST /api/search/metadata` — the search screen. The vault answers the
+/// fields it truly indexes — file-name substring, `IMAGE`/`VIDEO`, favorite
+/// — over both assets and albums; every other filter in Immich's large
+/// query DTO has no backing column and is ignored, which the response
+/// makes visible by simply not matching on it. Name search is a
+/// case-insensitive substring; albums match the same way.
+pub async fn search_metadata(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "originalFileName")]
+        original_file_name: Option<String>,
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        #[serde(rename = "isFavorite")]
+        is_favorite: Option<bool>,
+        #[serde(default)]
+        page: Option<u32>,
+        #[serde(default)]
+        size: Option<u32>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let page = req.page.unwrap_or(1).max(1);
+    let size = req.size.unwrap_or(100).clamp(1, 1000);
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let assets = index
+        .search_assets(
+            req.original_file_name.as_deref(),
+            req.kind.as_deref(),
+            req.is_favorite,
+            size,
+            (page - 1) * size,
+        )
+        .map_err(|_| ApiError::Internal)?;
+    let needle = req.original_file_name.as_deref().map(str::to_lowercase);
+    let albums: Vec<_> = index
+        .albums()
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .filter(|album| match &needle {
+            Some(n) => album.name.to_lowercase().contains(n),
+            None => true,
+        })
+        .collect();
+    let asset_items: Vec<_> = assets
+        .iter()
+        .map(|a| asset_json(a, &owner_of(&state, &headers), ""))
+        .collect();
+    json_ok(&json!({
+        "assets": {
+            "count": asset_items.len(),
+            "items": asset_items,
+            "total": asset_items.len(),
+            "facets": [],
+            "nextCursor": serde_json::Value::Null,
+        },
+        "albums": {
+            "count": albums.len(),
+            "items": albums.iter().map(album_json).collect::<Vec<_>>(),
+            "total": albums.len(),
+            "facets": [],
+            "nextCursor": serde_json::Value::Null,
+        },
+    }))
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
@@ -1088,6 +1159,7 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/shared-links/{id}", delete(delete_share))
         .route("/api/assets/{id}", get(asset_detail).put(update_asset))
         .route("/api/assets/statistics", get(asset_statistics))
+        .route("/api/search/metadata", post(search_metadata))
         .route("/api/memories", get(memories))
         .with_state(state)
 }

@@ -809,3 +809,85 @@ async fn favorite_toggles_and_statistics_count() {
     .await;
     assert_eq!(stats["total"], 2);
 }
+
+#[tokio::test]
+async fn search_filters_assets_by_name_kind_and_favorite() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let holiday = upload_bytes(&mut router, &token, "holiday-beach.png", &real_png(100, 60)).await;
+    let _work = upload_bytes(&mut router, &token, "work-meeting.png", &real_png(110, 70)).await;
+    let body = serde_json::json!({ "isFavorite": true }).to_string();
+    let _ = send(
+        &mut router,
+        "PUT",
+        &format!("/api/assets/{holiday}"),
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    let _ = send(
+        &mut router,
+        "POST",
+        "/api/albums",
+        Some(&token),
+        Some(
+            serde_json::json!({"albumName": "Holiday shots"})
+                .to_string()
+                .into_bytes(),
+        ),
+    )
+    .await;
+
+    // Name substring, case-insensitive, matches assets AND albums.
+    let body = serde_json::json!({ "originalFileName": "HOLIDAY" }).to_string();
+    let (status, found) = send(
+        &mut router,
+        "POST",
+        "/api/search/metadata",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let assets = found["assets"]["items"].as_array().expect("assets");
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["id"], holiday);
+    let albums = found["albums"]["items"].as_array().expect("albums");
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0]["albumName"], "Holiday shots");
+
+    // Favorite filter narrows to the starred asset.
+    let body = serde_json::json!({ "isFavorite": true }).to_string();
+    let (_, found) = send(
+        &mut router,
+        "POST",
+        "/api/search/metadata",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(found["assets"]["count"], 1);
+    assert_eq!(found["assets"]["items"][0]["id"], holiday);
+
+    // Type filter: IMAGE matches both (both are stills), VIDEO would be empty.
+    let body = serde_json::json!({ "type": "VIDEO" }).to_string();
+    let (_, found) = send(
+        &mut router,
+        "POST",
+        "/api/search/metadata",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(found["assets"]["count"], 0);
+
+    // No filters: everything.
+    let (_, found) = send(
+        &mut router,
+        "POST",
+        "/api/search/metadata",
+        Some(&token),
+        Some(serde_json::json!({}).to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(found["assets"]["count"], 2);
+}

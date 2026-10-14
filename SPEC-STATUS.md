@@ -133,6 +133,14 @@
   backup screen displays. Dogfooded on the release binary: star, detail
   agreement, statistics.
 
+- **Search** — `POST /api/search/metadata` over the fields the vault
+  truly indexes: file-name substring (case-insensitive, matching assets
+  and album names), `IMAGE`/`VIDEO`, favorite. Immich's query DTO carries
+  thirty-plus filters; the ones with no backing column are ignored, and
+  the response shows it by not matching on them. The WHERE clause is
+  assembled from numbered placeholders only — user input is always a
+  bound value, never SQL text.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

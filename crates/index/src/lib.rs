@@ -349,6 +349,87 @@ impl Index {
             .map_err(IndexError::from)
     }
 
+    /// Search assets: file-name substring (case-insensitive), kind
+    /// (`IMAGE`/`VIDEO`), favorite flag — any combination, newest capture
+    /// first, paginated. The WHERE clause is assembled from fixed variants
+    /// with bound values only: user input never touches SQL text.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn search_assets(
+        &self,
+        name: Option<&str>,
+        kind: Option<&str>,
+        favorite: Option<bool>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<AssetRecord>, IndexError> {
+        // Placeholders are numbered in binding order; user input is always
+        // a bound value, never SQL text.
+        let mut clauses: Vec<String> = Vec::new();
+        let mut next = 1usize;
+        if name.is_some() {
+            clauses.push(format!("file_name LIKE '%' || ?{next} || '%'"));
+            next += 1;
+        }
+        if let Some(kind) = kind {
+            clauses.push(match kind {
+                "VIDEO" => "duration_ms IS NOT NULL".into(),
+                _ => "duration_ms IS NULL".into(),
+            });
+        }
+        if favorite.is_some() {
+            clauses.push(format!("is_favorite = ?{next}"));
+            next += 1;
+        }
+        let mut sql = String::from(
+            "SELECT address, width, height, taken_at, make, model,
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1,
+                    thumbhash, is_favorite
+             FROM assets",
+        );
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(&format!(
+            " ORDER BY taken_at DESC, address ASC LIMIT ?{next} OFFSET ?{}",
+            next + 1
+        ));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(name) = name {
+            params.push(Box::new(name.to_string()));
+        }
+        if let Some(favorite) = favorite {
+            params.push(Box::new(i64::from(favorite)));
+        }
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+        let references: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(references.as_slice(), |row| {
+            Ok(AssetRecord {
+                address: row.get(0)?,
+                width: row.get(1)?,
+                height: row.get(2)?,
+                taken_at: row.get(3)?,
+                make: row.get(4)?,
+                model: row.get(5)?,
+                latitude: row.get(6)?,
+                longitude: row.get(7)?,
+                duration_ms: row.get(8)?,
+                byte_len: row.get(9)?,
+                file_name: row.get(10)?,
+                sha1: row.get(11)?,
+                thumbhash: row.get(12)?,
+                is_favorite: row.get::<_, i64>(13)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
     /// Capture-day buckets, newest first: `(day, count)`. The same day rule
     /// the timeline uses — EXIF `taken_at` when present, the 1970 sentinel
     /// grouping untagged assets by ingest order.
