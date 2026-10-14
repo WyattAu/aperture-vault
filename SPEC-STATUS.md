@@ -78,6 +78,17 @@
   double membership. Sharing fields (`albumUsers`, `shared`) ship at their
   neutral values: shape-complete, feature-honest.
 
+- **Dogfooded against the real binary** (release build, curl as the
+  client, ffmpeg-generated JPEGs as the library): `add-user` CLI (which
+  dogfooding found missing — the config endpoint promised it), connect
+  handshake, login, checksum dedup (accept before upload, reject/
+  duplicate with the asset id after), upload returning
+  `created`/`duplicate`, byte-identical CAS dedup across two "different"
+  files, sentinel-day bucket for EXIF-less images, preview thumbnails
+  served as real JPEGs and cache-identical on the second fetch, album
+  create-seeded-and-listed over the wire. The whole flow a phone runs,
+  working against the shipped binary on Immich's own default port.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

@@ -3,19 +3,40 @@
 //! A binary that refuses to start on a bad configuration is honest; the
 //! `expect`s here are that refusal, and the crate lint denies them for
 //! library code where they would be silent failure modes.
+//!
+//! Usage:
+//!
+//! - `aperture-server [vault-root] [bind-addr]` — serve (defaults:
+//!   `vault`, `0.0.0.0:2283` — the port Immich clients expect).
+//! - `aperture-server add-user <vault-root> <email> <password>` — create
+//!   the first user. There is no admin-signup dance; an account exists
+//!   because the operator ran this.
 
 #![allow(clippy::expect_used)]
 
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("vault"));
-    let bind = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "0.0.0.0:2283".to_string());
+    let mut args = std::env::args().skip(1);
+    let first = args.next().unwrap_or_else(|| "serve".into());
+    if first == "add-user" {
+        let (root, email, password): (PathBuf, String, String) =
+            match (args.next(), args.next(), args.next()) {
+                (Some(root), Some(email), Some(password)) => (root.into(), email, password),
+                _ => {
+                    eprintln!("usage: aperture-server add-user <vault-root> <email> <password>");
+                    std::process::exit(2);
+                }
+            };
+        let state = aperture_server::AppState::new(&root)?;
+        let user = state
+            .register_user(&email, &password, &email)
+            .map_err(|e| format!("register: {e}"))?;
+        eprintln!("user {} created ({})", user.username, user.id);
+        return Ok(());
+    }
+    let root = PathBuf::from(first);
+    let bind = args.next().unwrap_or_else(|| "0.0.0.0:2283".to_string());
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
