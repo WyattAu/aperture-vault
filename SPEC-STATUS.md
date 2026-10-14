@@ -111,6 +111,14 @@
   the shared album's members. Roles are distinct by construction: a
   session token is not a share key and never authenticates as one.
 
+- **Asset detail** — `GET /api/assets/{id}`, the record the app opens per
+  photo: full `AssetResponseDto` shape (dimensions, EXIF block, placeholder,
+  neutral feature fields), mime sniffed from the stored magic through a
+  bounded 16-byte read — never the whole blob for a content type. The
+  redundant native byte route (`GET /api/assets/{address}`) was folded
+  into Immich's `GET /api/assets/{id}/original`: one bytes path, one
+  detail path, no overlapping captures for axum to trip over.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

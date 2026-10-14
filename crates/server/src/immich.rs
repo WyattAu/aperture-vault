@@ -814,7 +814,7 @@ fn authorize_share(
     Ok(record)
 }
 
-/// `GET /api/shared-links/me?key=` — the public face of a share: the album
+/// The public face of a share: the album
 /// and its asset ids, no session required. A revoked, expired, or
 /// never-existing key is the same 401; a probe learns nothing.
 pub async fn shared_album(
@@ -851,6 +851,96 @@ pub async fn shared_album(
     json_ok(&dto)
 }
 
+/// Immich's `AssetResponseDto` from the vault's own record — the detail
+/// view the app opens per photo. Featureless fields carry their neutral
+/// values (`isFavorite: false`, `isTrashed: false`): the shape is complete,
+/// the features are honestly absent.
+#[allow(clippy::too_many_lines)]
+fn asset_json(record: &aperture_index::AssetRecord, owner: &str, mime: &str) -> serde_json::Value {
+    let captured = record
+        .taken_at
+        .clone()
+        .unwrap_or_else(|| "1970-01-01T00:00:00".into());
+    let is_image = record.duration_ms.is_none();
+    json!({
+        "id": record.address,
+        "checksum": record.sha1.clone().unwrap_or_default(),
+        "createdAt": captured,
+        "fileCreatedAt": captured,
+        "fileModifiedAt": captured,
+        "localDateTime": captured,
+        "updatedAt": captured,
+        "duration": (record.duration_ms.unwrap_or(0) / 1000),
+        "hasMetadata": record.taken_at.is_some(),
+        "height": record.height,
+        "width": record.width,
+        "isArchived": false,
+        "isEdited": false,
+        "isFavorite": false,
+        "isOffline": false,
+        "isTrashed": false,
+        "libraryId": "",
+        "livePhotoVideoId": "",
+        "duplicateId": "",
+        "originalFileName": record.file_name.clone().unwrap_or_default(),
+        "originalPath": record.file_name.clone().unwrap_or_default(),
+        "originalMimeType": mime,
+        "ownerId": owner,
+        "people": [],
+        "stack": [],
+        "tags": [],
+        "resized": record.thumbhash.is_some(),
+        "thumbhash": record.thumbhash.clone().unwrap_or_default(),
+        "type": if is_image { "IMAGE" } else { "VIDEO" },
+        "visibility": "timeline",
+        "exifInfo": {
+            "make": record.make,
+            "model": record.model,
+            "latitude": record.latitude,
+            "longitude": record.longitude,
+            "dateTimeOriginal": record.taken_at,
+        },
+    })
+}
+
+/// `GET /api/assets/{id}` — one asset's full record. Session or a share key
+/// whose album contains the asset.
+pub async fn asset_detail(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    authorize_asset(&state, &headers, &id, params.get("key").map(String::as_str))?;
+    let addr = crate::cas_address(&id)?;
+    let owner = require_user(&state, &headers).or_else(|_| {
+        // A share visitor gets the record too — the key already scoped
+        // the asset; the ownerId field carries the empty string because
+        // the visitor has no business learning account ids.
+        Ok::<String, ApiError>(String::new())
+    })?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let record = index
+        .asset(&addr.hex())
+        .map_err(|_| ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+    drop(index);
+    // The mime comes from the stored magic, not the extension: a bounded
+    // read of the first bytes, never the whole blob for a content type.
+    let mime = state
+        .store
+        .open_read(&addr)
+        .ok()
+        .and_then(|mut file| {
+            use std::io::Read as _;
+            let mut prefix = [0u8; 16];
+            file.read_exact(&mut prefix).ok()?;
+            Some(crate::mime_for(&prefix))
+        })
+        .unwrap_or("application/octet-stream");
+    json_ok(&asset_json(&record, &owner, mime))
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
@@ -881,5 +971,6 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/shared-links", post(create_share).get(shares))
         .route("/api/shared-links/me", get(shared_album))
         .route("/api/shared-links/{id}", delete(delete_share))
+        .route("/api/assets/{id}", get(asset_detail))
         .with_state(state)
 }

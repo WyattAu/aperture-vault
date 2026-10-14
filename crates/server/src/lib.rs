@@ -13,7 +13,7 @@
 //! race conditions. The binary in `main.rs` only adds the bind and serve.
 
 use aperture_auth::{Auth, UserStore};
-use aperture_cas::{Address, Store};
+use aperture_cas::Store;
 use aperture_index::Index;
 use axum::response::IntoResponse as _;
 use std::path::Path;
@@ -147,7 +147,6 @@ pub fn build_router(state: AppState) -> axum::Router {
     let native = axum::Router::new()
         .route("/api/timeline", get(timeline))
         .route("/api/assets", post(upload_dispatch))
-        .route("/api/assets/{address}", get(asset_bytes))
         .with_state(state.clone());
     native.merge(crate::immich::immich_router(state))
 }
@@ -254,29 +253,6 @@ async fn upload(
 }
 
 use std::io::Cursor;
-
-async fn asset_bytes(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    axum::extract::Path(address): axum::extract::Path<String>,
-) -> ApiResult {
-    require_user(&state, &headers)?;
-    let addr = Address::parse_hex(&address).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let bytes = state.store.get_bytes(&addr).map_err(|e| match e {
-        aperture_cas::CasError::Missing { .. } => ApiError::NotFound,
-        _other => ApiError::Internal,
-    })?;
-    let mime = mime_for(&bytes);
-    let mut response = axum::response::Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, mime)
-        .body(axum::body::Body::from(bytes))
-        .map_err(|_| ApiError::Internal)?;
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, max-age=31536000"),
-    );
-    Ok(response)
-}
 
 /// Parse an asset id into its content address.
 pub(crate) fn cas_address(id: &str) -> Result<aperture_cas::Address, ApiError> {

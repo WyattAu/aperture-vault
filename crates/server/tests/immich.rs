@@ -632,3 +632,57 @@ async fn share_links_expose_an_album_publicly_until_revoked() {
     let response = router.clone().oneshot(request).await.expect("responds");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn asset_detail_returns_the_full_record_shaped_like_immich() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let png = real_png(420, 240);
+    let address = upload_bytes(&mut router, &token, "detail.png", &png).await;
+
+    // Derive the thumbnail so the record has a placeholder too.
+    let uri = format!("/api/assets/{address}/thumbnail");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let uri = format!("/api/assets/{address}");
+    let (status, detail) = send(&mut router, "GET", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["id"], address);
+    assert_eq!(detail["type"], "IMAGE");
+    assert_eq!(detail["width"], 420);
+    assert_eq!(detail["height"], 240);
+    assert_eq!(detail["isFavorite"], false);
+    assert_eq!(detail["visibility"], "timeline");
+    assert!(detail["thumbhash"].as_str().is_some_and(|h| !h.is_empty()));
+    assert_eq!(detail["originalMimeType"], "image/png");
+    // EXIF block carries what the probe found; none here, honestly null.
+    assert_eq!(detail["exifInfo"]["make"], serde_json::Value::Null);
+
+    // Unknown id: 404, not a panic.
+    let zeros = "0".repeat(64);
+    let (status, _) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{zeros}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // No credentials: 401.
+    let (status, _) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{address}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

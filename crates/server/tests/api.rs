@@ -188,7 +188,7 @@ async fn upload_then_timeline_then_fetch_round_trips() {
     let (status, bytes) = send_raw(
         &mut router,
         "GET",
-        &format!("/api/assets/{address}"),
+        &format!("/api/assets/{address}/original"),
         &token,
     )
     .await;
