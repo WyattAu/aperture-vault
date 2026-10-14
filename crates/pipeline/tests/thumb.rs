@@ -135,3 +135,50 @@ fn resize_filter_preserves_aspect_for_the_record() {
     let ratio = f64::from(resized.width()) / f64::from(resized.height());
     assert!((ratio - 2.0).abs() < 0.05, "2:1 stays 2:1, got {ratio}");
 }
+
+#[test]
+fn thumbnail_generation_also_yields_the_thumbhash() {
+    let (_dir, store, index) = env();
+    let source = ingest_png(&store, &index, 300, 200);
+
+    // The hash is recorded by thumbnail generation itself, from the same
+    // decode — one read of the original pays for both artifacts.
+    let _ = thumbnail(&store, &index, &source, ThumbSize::Thumbnail).expect("generates");
+    let record = index
+        .asset(&source.hex())
+        .expect("query")
+        .expect("recorded");
+    let b64 = record.thumbhash.expect("placeholder stored");
+    assert!(!b64.is_empty());
+
+    // It is a real ThumbHash: decodable back to pixels, byte-for-byte stable
+    // across a re-derivation through the standalone path.
+    use base64::Engine as _;
+    let hash = base64::engine::general_purpose::STANDARD
+        .decode(&b64)
+        .expect("base64");
+    let (w, h, _rgba) = thumbhash::thumb_hash_to_rgba(&hash).expect("decodes");
+    assert!(
+        (1..=32).contains(&w) && (1..=32).contains(&h),
+        "hash dims in range"
+    );
+
+    let again = aperture_pipeline::thumb::thumbhash(&store, &index, &source).expect("cached");
+    assert_eq!(
+        again, b64,
+        "the stored placeholder is returned, not recomputed"
+    );
+}
+
+#[test]
+fn thumbhash_of_a_non_image_is_refused() {
+    let (_dir, store, index) = env();
+    let not_an_image = b"\x00\x01not pixels".repeat(64);
+    let report = Pipeline::ingest(&store, &index, Cursor::new(&not_an_image), Some("x.bin"))
+        .expect("ingests");
+    let outcome = aperture_pipeline::thumb::thumbhash(&store, &index, &report.address);
+    assert!(matches!(
+        outcome,
+        Err(aperture_pipeline::PipelineError::NotAnImage)
+    ));
+}

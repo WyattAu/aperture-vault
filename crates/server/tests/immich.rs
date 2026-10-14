@@ -415,6 +415,22 @@ async fn timeline_buckets_and_bucket_match_the_immich_shapes() {
     assert_eq!(ids[0].as_str(), Some(address.as_str()));
     assert_eq!(bucket["isImage"][0], serde_json::Value::Bool(true));
     assert_eq!(bucket["visibility"][0], "timeline");
+    // Before any thumbnail is derived, the placeholder column is honestly
+    // empty; after generation it carries the base64 ThumbHash.
+    assert_eq!(bucket["thumbhash"][0], "");
+    let thumb_uri = format!("/api/assets/{address}/thumbnail");
+    let request = Request::builder()
+        .uri(&thumb_uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let (status, bucket) = send(&mut router, "GET", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let hash = bucket["thumbhash"][0].as_str().expect("hash").to_string();
+    assert!(!hash.is_empty(), "a placeholder now exists");
+
     // Position alignment: every parallel array has the same length.
     for (key, value) in bucket.as_object().expect("object") {
         assert_eq!(

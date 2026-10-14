@@ -130,6 +130,7 @@ impl Pipeline {
             byte_len: ingested.len,
             file_name: file_name.map(str::to_string),
             sha1: Some(sha1_hex),
+            thumbhash: None,
         };
         index.record_asset(&record).map_err(PipelineError::Index)?;
         Ok(IngestReport {

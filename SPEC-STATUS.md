@@ -1,4 +1,4 @@
-# Status — after the Immich backup-flow milestone (2026-10-14)
+# Status — after the ThumbHash milestone (2026-10-14)
 
 ## Shipped
 
@@ -89,6 +89,16 @@
   create-seeded-and-listed over the wire. The whole flow a phone runs,
   working against the shipped binary on Immich's own default port.
 
+- **ThumbHash placeholders** — the last visual gap. One decode of the
+  original now yields both derived artifacts: the sized JPEG thumbnail and
+  the placeholder. The reference downsamples to 100 px before encoding;
+  the pipeline does the same, so hashes are byte-compatible with what
+  clients generate. `thumbhash = "0.1"` is evanw's own algorithm — pure
+  Rust, zero unsafe, and the wire format is the spec, so a hand-rolled
+  DSP variant would break client compat, not express it. The hash rides
+  the columnar timeline (`thumbhash` column, honestly empty until the
+  first derivation fills it) and is stored via an additive migration.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
@@ -105,9 +115,9 @@ estate CI gate, `salting` + `tokenkit` from crates.io (the same pins
    decision above this repository.
 2. **Auth is session+share only** — no OAuth, no email flows. The JWT
    substrate makes adding them mechanical.
-5. **thumbhash/blurhash** is the remaining Immich surface gap that
-   matters visually: backup, gallery, and albums work end to end; blur
-   placeholders still render as nothing.
+5. *(closed)* thumbhash shipped — placeholders ride the columnar
+   timeline; dogfooded against the release binary (28-char base64, 19
+   bytes of binary, column-aligned).
 3. **Thumbnails** (M4) ship for stills; **video poster frames and
    transcodes** are the honest future case for worker-kit — a queue earns
    its weight when generation is slow, and video is. Derived stills are

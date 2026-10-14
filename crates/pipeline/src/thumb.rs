@@ -1,4 +1,6 @@
 //! Thumbnail derivation: decode an original, resize it, cache the result.
+//! One decode pays for both derived artifacts — the sized JPEG and the
+//! ThumbHash placeholder the gallery renders before the thumbnail arrives.
 //!
 //! # Why synchronous, not a job queue
 //!
@@ -14,6 +16,7 @@
 use crate::PipelineError;
 use aperture_cas::{Address, Store};
 use aperture_index::Index;
+use base64::Engine as _;
 use image::imageops::FilterType;
 
 /// A requested thumbnail size. The two sizes are the ones Immich clients
@@ -100,6 +103,24 @@ pub fn thumbnail(
 
     let original = store.get_bytes(source)?;
     let decoded = image::load_from_memory(&original).map_err(|_| PipelineError::NotAnImage)?;
+
+    // The ThumbHash placeholder comes from the same decode: one read of the
+    // original pays for both derived artifacts. The reference downsamples
+    // input to at most 100 px before encoding; do the same so the hash is
+    // byte-compatible with what clients generate.
+    let hash_input = if decoded.width().max(decoded.height()) > 100 {
+        decoded.resize(100, 100, FilterType::Triangle)
+    } else {
+        decoded.clone()
+    };
+    let rgba = hash_input.to_rgba8();
+    let hash_bytes =
+        thumbhash::rgba_to_thumb_hash(rgba.width() as usize, rgba.height() as usize, rgba.as_raw());
+    let thumbhash_b64 = base64::engine::general_purpose::STANDARD.encode(&hash_bytes);
+    index
+        .record_thumbhash(&source_hex, &thumbhash_b64)
+        .map_err(PipelineError::Index)?;
+
     // Bound the longest edge, preserving aspect ratio — `resize` already
     // keeps the aspect, the guard declines to "enlarge" small originals.
     let bounded = if decoded.width().max(decoded.height()) > size.bound() {
@@ -123,4 +144,39 @@ pub fn thumbnail(
         cached: false,
         bytes: encoded,
     })
+}
+
+/// The asset's ThumbHash placeholder (base64), computing and caching it when
+/// the asset has none yet. Assets whose thumbnails were derived before
+/// placeholders existed get filled in here on first request.
+///
+/// # Errors
+///
+/// [`PipelineError::NotAnImage`] when the original is not a decodable still
+/// image; [`PipelineError::Cas`] and [`PipelineError::Index`] on storage
+/// failure.
+pub fn thumbhash(store: &Store, index: &Index, source: &Address) -> Result<String, PipelineError> {
+    let source_hex = source.hex();
+    if let Some(existing) = index
+        .asset(&source_hex)
+        .map_err(PipelineError::Index)?
+        .and_then(|record| record.thumbhash)
+    {
+        return Ok(existing);
+    }
+    let original = store.get_bytes(source)?;
+    let decoded = image::load_from_memory(&original).map_err(|_| PipelineError::NotAnImage)?;
+    let hash_input = if decoded.width().max(decoded.height()) > 100 {
+        decoded.resize(100, 100, FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let rgba = hash_input.to_rgba8();
+    let hash_bytes =
+        thumbhash::rgba_to_thumb_hash(rgba.width() as usize, rgba.height() as usize, rgba.as_raw());
+    let thumbhash_b64 = base64::engine::general_purpose::STANDARD.encode(&hash_bytes);
+    index
+        .record_thumbhash(&source_hex, &thumbhash_b64)
+        .map_err(PipelineError::Index)?;
+    Ok(thumbhash_b64)
 }

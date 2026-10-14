@@ -101,6 +101,10 @@ pub struct AssetRecord {
     /// clients compare. Not an identity: [`Index::asset_by_sha1`] exists so
     /// clients' checksums resolve, while the CAS's truth stays BLAKE3.
     pub sha1: Option<String>,
+    /// Base64 ThumbHash placeholder, computed when a thumbnail is first
+    /// derived. `None` until then: the hash costs a decode, so it is paid
+    /// on the same on-demand path as the thumbnail itself.
+    pub thumbhash: Option<String>,
 }
 
 /// One timeline entry: the address, its capture day, and display time.
@@ -166,8 +170,8 @@ impl Index {
         let changed = self.conn.execute(
             "INSERT INTO assets
                (address, width, height, taken_at, make, model,
-                latitude, longitude, duration_ms, byte_len, file_name, sha1)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(address) DO NOTHING",
             rusqlite::params![
                 r.address,
@@ -182,6 +186,7 @@ impl Index {
                 r.byte_len,
                 r.file_name,
                 r.sha1,
+                r.thumbhash,
             ],
         )?;
         Ok(if changed == 0 {
@@ -229,7 +234,7 @@ impl Index {
     pub fn asset(&self, address: &str) -> Result<Option<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash
              FROM assets WHERE address = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address], |row| {
@@ -246,6 +251,7 @@ impl Index {
                 byte_len: row.get(9)?,
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
+                thumbhash: row.get(12)?,
             })
         })?;
         match rows.next() {
@@ -274,6 +280,19 @@ impl Index {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(other.into()),
             })
+    }
+
+    /// Store an asset's ThumbHash placeholder (base64), after generation.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn record_thumbhash(&self, address: &str, thumbhash: &str) -> Result<(), IndexError> {
+        self.conn.execute(
+            "UPDATE assets SET thumbhash = ?2 WHERE address = ?1",
+            rusqlite::params![address, thumbhash],
+        )?;
+        Ok(())
     }
 
     /// Capture-day buckets, newest first: `(day, count)`. The same day rule
@@ -305,7 +324,7 @@ impl Index {
     pub fn assets_in_day(&self, day: &str) -> Result<Vec<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash
              FROM assets
              WHERE COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
              ORDER BY substr(taken_at, 12, 8) DESC, address ASC",
@@ -324,6 +343,7 @@ impl Index {
                 byte_len: row.get(9)?,
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
+                thumbhash: row.get(12)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -463,7 +483,8 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT assets.address, assets.width, assets.height, assets.taken_at,
                     assets.make, assets.model, assets.latitude, assets.longitude,
-                    assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1
+                    assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1,
+                    assets.thumbhash
              FROM album_assets m
              JOIN assets ON assets.address = m.address
              WHERE m.album_id = ?1
@@ -483,6 +504,7 @@ impl Index {
                 byte_len: row.get(9)?,
                 file_name: row.get(10)?,
                 sha1: row.get(11)?,
+                thumbhash: row.get(12)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -602,7 +624,10 @@ impl Index {
 /// the index is documented as a rebuildable cache, so migrations never
 /// rewrite data — they only widen it.
 fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
-    let migrations: &[&str] = &["ALTER TABLE assets ADD COLUMN sha1 TEXT"];
+    let migrations: &[&str] = &[
+        "ALTER TABLE assets ADD COLUMN sha1 TEXT",
+        "ALTER TABLE assets ADD COLUMN thumbhash TEXT",
+    ];
     for sql in migrations {
         let result = conn.execute_batch(sql);
         if let Err(rusqlite::Error::SqliteFailure(_, msg)) = &result {
@@ -633,7 +658,8 @@ CREATE TABLE IF NOT EXISTS assets (
     duration_ms INTEGER,
     byte_len   INTEGER NOT NULL,
     file_name  TEXT,
-    sha1       TEXT
+    sha1       TEXT,
+    thumbhash  TEXT
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 

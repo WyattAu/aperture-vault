@@ -384,7 +384,10 @@ fn columnar(assets: &[aperture_index::AssetRecord], owner: &str) -> serde_json::
             (Some(w), Some(h)) if h > 0 => serde_json::json!(f64::from(w) / f64::from(h)),
             _ => serde_json::json!(1.0),
         })).collect()),
-        "thumbhash": c(vec![json!(""); n]),
+        "thumbhash": c(assets
+            .iter()
+            .map(|a| json!(a.thumbhash.clone().unwrap_or_default()))
+            .collect()),
         "visibility": c(vec![json!("timeline"); n]),
         "latitude": c(assets.iter().map(|a| json!(a.latitude)).collect()),
         "longitude": c(assets.iter().map(|a| json!(a.longitude)).collect()),

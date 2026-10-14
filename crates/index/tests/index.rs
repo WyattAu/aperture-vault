@@ -28,6 +28,7 @@ fn record(address: &str, taken_at: Option<&str>, name: &str) -> aperture_index::
         byte_len: 1000,
         file_name: Some(format!("{name}.jpg")),
         sha1: None,
+        thumbhash: None,
     }
 }
 

@@ -121,6 +121,7 @@ fn the_index_is_rebuildable_from_the_cas_alone() {
                 byte_len: bytes.len() as u64,
                 file_name: None,
                 sha1: None,
+                thumbhash: None,
             })
             .expect("record");
     }
