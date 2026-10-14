@@ -141,6 +141,16 @@
   assembled from numbered placeholders only — user input is always a
   bound value, never SQL text.
 
+- **Trash** — `DELETE /api/assets` (trash; `force` skips to permanent),
+  `GET /api/trash`, `POST /api/trash/restore/assets`, `POST
+  /api/trash/restore`, `POST /api/trash/empty`. A trashed asset leaves
+  every read — timeline, buckets, search, memories, statistics, albums,
+  asset detail, originals, thumbnails — because the index decides and the
+  CAS only stores. Restores put album memberships back untouched (they
+  were never removed). Emptying is the one place the cache intentionally
+  forgets: rows, memberships, and derived mappings go; the CAS blobs
+  become unreferenced garbage for the horizon sweeper.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

@@ -891,3 +891,109 @@ async fn search_filters_assets_by_name_kind_and_favorite() {
     .await;
     assert_eq!(found["assets"]["count"], 2);
 }
+
+#[tokio::test]
+async fn trash_hides_then_restores_then_destroys() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let a = upload_bytes(&mut router, &token, "doomed.png", &real_png(90, 90)).await;
+    let b = upload_bytes(&mut router, &token, "kept.png", &real_png(95, 95)).await;
+
+    // Trash one of two: it leaves the timeline, statistics, and search,
+    // and the original endpoint reports gone.
+    let body = serde_json::json!({ "ids": [a] }).to_string();
+    let (status, result) = send(
+        &mut router,
+        "DELETE",
+        "/api/assets",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["count"], 1);
+
+    let (_, stats) = send(
+        &mut router,
+        "GET",
+        "/api/assets/statistics",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(stats["total"], 1, "trash is not owned data");
+
+    let (_, search) = send(
+        &mut router,
+        "POST",
+        "/api/search/metadata",
+        Some(&token),
+        Some(serde_json::json!({}).to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(search["assets"]["count"], 1, "only the kept asset remains");
+
+    let uri = format!("/api/assets/{a}/original");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "trashed is gone from the reads"
+    );
+
+    // The trash screen sees it; restore brings it back to the reads.
+    let (_, trash) = send(&mut router, "GET", "/api/trash", Some(&token), None).await;
+    assert_eq!(trash["count"], 1);
+    assert_eq!(trash["items"][0]["isTrashed"], true);
+    let (status, result) = send(
+        &mut router,
+        "POST",
+        "/api/trash/restore/assets",
+        Some(&token),
+        Some(serde_json::json!({ "ids": [a] }).to_string().into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["count"], 1);
+    let uri = format!("/api/assets/{a}/original");
+    let request = Request::builder()
+        .uri(&uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "restored is readable again"
+    );
+
+    // Trash both, empty: gone everywhere, permanently.
+    let body = serde_json::json!({ "ids": [a, b] }).to_string();
+    let _ = send(
+        &mut router,
+        "DELETE",
+        "/api/assets",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    let (status, result) = send(&mut router, "POST", "/api/trash/empty", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["count"], 2);
+    let (_, stats) = send(
+        &mut router,
+        "GET",
+        "/api/assets/statistics",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(stats["total"], 0);
+    let (_, trash) = send(&mut router, "GET", "/api/trash", Some(&token), None).await;
+    assert_eq!(trash["count"], 0);
+}

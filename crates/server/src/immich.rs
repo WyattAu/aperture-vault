@@ -158,6 +158,18 @@ pub async fn original(
 ) -> ApiResult {
     authorize_asset(&state, &headers, &id, params.get("key").map(String::as_str))?;
     let addr = crate::cas_address(&id)?;
+    // Trashed assets are gone from the reads: the index decides, the CAS
+    // only stores. (Also rejects unknown ids.)
+    let listed = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .asset(&addr.hex())
+        .map_err(|_| ApiError::Internal)?
+        .is_some();
+    if !listed {
+        return Err(ApiError::NotFound);
+    }
     let bytes = state.store.get_bytes(&addr).map_err(|e| match e {
         aperture_cas::CasError::Missing { .. } => ApiError::NotFound,
         _other => ApiError::Internal,
@@ -224,6 +236,17 @@ pub async fn thumbnail(
     axum::extract::Query(query): axum::extract::Query<ThumbQuery>,
 ) -> ApiResult {
     authorize_asset(&state, &headers, &id, query.share_key())?;
+    let addr = crate::cas_address(&id)?;
+    let listed = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .asset(&addr.hex())
+        .map_err(|_| ApiError::Internal)?
+        .is_some();
+    if !listed {
+        return Err(ApiError::NotFound);
+    }
     let size = match query.size.as_deref() {
         None | Some("thumbnail") => aperture_pipeline::thumb::ThumbSize::Thumbnail,
         Some("preview") => aperture_pipeline::thumb::ThumbSize::Preview,
@@ -233,7 +256,6 @@ pub async fn thumbnail(
             )));
         }
     };
-    let addr = crate::cas_address(&id)?;
     let store = Arc::clone(&state.store);
     let index = Arc::clone(&state.index);
     let derived = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
@@ -1056,6 +1078,127 @@ pub async fn asset_statistics(
     json_ok(&json!({ "images": images, "videos": videos, "total": total }))
 }
 
+/// `DELETE /api/assets` — trash the named assets. With `force: true` the
+/// deletion is permanent in one step: the index rows and their memberships
+/// go, and the CAS blobs become unreferenced garbage for the horizon
+/// sweeper. Without it, trash is one stamp away from a restore.
+pub async fn delete_assets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        ids: Vec<String>,
+        #[serde(default)]
+        force: bool,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let count = if req.force {
+        // Permanent in one step: mark, then forget.
+        index.trash(&req.ids).map_err(|_| ApiError::Internal)?;
+        index.trash_empty().map_err(|_| ApiError::Internal)
+    } else {
+        let moved: Vec<bool> = index
+            .trash(&req.ids)
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|(_, moved)| moved)
+            .collect();
+        Ok(moved.into_iter().filter(|m| *m).count() as u64)
+    }
+    .map_err(|_| ApiError::Internal)?;
+    json_ok(&json!({ "count": count }))
+}
+
+/// `POST /api/trash/restore/assets` — bring the named assets back.
+pub async fn trash_restore_assets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let req: BulkIds =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let restored: Vec<bool> = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .restore(&req.ids)
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|(_, restored)| restored)
+        .collect();
+    json_ok(&json!({ "count": restored.into_iter().filter(|r| *r).count() }))
+}
+
+/// `POST /api/trash/empty` — permanent. The count is what was destroyed.
+pub async fn trash_empty(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let count = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .trash_empty()
+        .map_err(|_| ApiError::Internal)?;
+    json_ok(&json!({ "count": count }))
+}
+
+/// `POST /api/trash/restore` — bring everything in the trash back.
+pub async fn trash_restore_all(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let all: Vec<String> = index
+        .trashed()
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|record| record.address)
+        .collect();
+    drop(index);
+    let restored: Vec<bool> = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .restore(&all)
+        .map_err(|_| ApiError::Internal)?
+        .into_iter()
+        .map(|(_, restored)| restored)
+        .collect();
+    json_ok(&json!({ "count": restored.into_iter().filter(|r| *r).count() }))
+}
+
+/// `GET /api/trash` — the trash contents; the screen the restore button
+/// lives on.
+pub async fn trash_view(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let items = index.trashed().map_err(|_| ApiError::Internal)?;
+    let owner = owner_of(&state, &headers);
+    let dtos: Vec<_> = items
+        .iter()
+        .map(|a| {
+            let mut dto = asset_json(a, &owner, "");
+            if let Some(fields) = dto.as_object_mut() {
+                fields.insert("isTrashed".into(), json!(true));
+            }
+            dto
+        })
+        .collect();
+    json_ok(&json!({ "count": dtos.len(), "items": dtos }))
+}
+
 /// `POST /api/search/metadata` — the search screen. The vault answers the
 /// fields it truly indexes — file-name substring, `IMAGE`/`VIDEO`, favorite
 /// — over both assets and albums; every other filter in Immich's large
@@ -1161,5 +1304,9 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/assets/statistics", get(asset_statistics))
         .route("/api/search/metadata", post(search_metadata))
         .route("/api/memories", get(memories))
+        .route("/api/trash", get(trash_view))
+        .route("/api/trash/empty", post(trash_empty))
+        .route("/api/trash/restore", post(trash_restore_all))
+        .route("/api/trash/restore/assets", post(trash_restore_assets))
         .with_state(state)
 }

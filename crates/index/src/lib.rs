@@ -230,6 +230,7 @@ impl Index {
                     substr(taken_at, 12, 8) AS time,
                     file_name
              FROM assets
+             WHERE trashed_at IS NULL
              ORDER BY day DESC, time DESC, address ASC
              LIMIT ?1 OFFSET ?2",
         )?;
@@ -254,7 +255,7 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
-             FROM assets WHERE address = ?1",
+             FROM assets WHERE address = ?1 AND trashed_at IS NULL",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address], |row| {
             Ok(AssetRecord {
@@ -329,6 +330,132 @@ impl Index {
         Ok(changed > 0)
     }
 
+    /// Move assets to trash: stamp the time, change nothing else. Album
+    /// memberships survive so a restore puts everything back where it was.
+    /// Returns each id with whether it was moved (existing and not already
+    /// trashed).
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn trash(&self, addresses: &[String]) -> Result<Vec<(String, bool)>, IndexError> {
+        let now = timestamp_now();
+        let mut out = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let changed = self.conn.execute(
+                "UPDATE assets SET trashed_at = ?2
+                 WHERE address = ?1 AND trashed_at IS NULL",
+                rusqlite::params![address, now],
+            )?;
+            out.push((address.clone(), changed > 0));
+        }
+        Ok(out)
+    }
+
+    /// The trash contents, newest trash-time first.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn trashed(&self) -> Result<Vec<AssetRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, width, height, taken_at, make, model,
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1,
+                    thumbhash, is_favorite
+             FROM assets
+             WHERE trashed_at IS NOT NULL
+             ORDER BY trashed_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AssetRecord {
+                address: row.get(0)?,
+                width: row.get(1)?,
+                height: row.get(2)?,
+                taken_at: row.get(3)?,
+                make: row.get(4)?,
+                model: row.get(5)?,
+                latitude: row.get(6)?,
+                longitude: row.get(7)?,
+                duration_ms: row.get(8)?,
+                byte_len: row.get(9)?,
+                file_name: row.get(10)?,
+                sha1: row.get(11)?,
+                thumbhash: row.get(12)?,
+                is_favorite: row.get::<_, i64>(13)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// How many assets are in the trash.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn trash_count(&self) -> Result<u64, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM assets WHERE trashed_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(IndexError::from)
+    }
+
+    /// Restore assets from trash. Returns each id with whether it was
+    /// trashed (and is now not).
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn restore(&self, addresses: &[String]) -> Result<Vec<(String, bool)>, IndexError> {
+        let mut out = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let changed = self.conn.execute(
+                "UPDATE assets SET trashed_at = NULL
+                 WHERE address = ?1 AND trashed_at IS NOT NULL",
+                rusqlite::params![address],
+            )?;
+            out.push((address.clone(), changed > 0));
+        }
+        Ok(out)
+    }
+
+    /// Empty the trash: permanently remove trashed rows and their album
+    /// memberships and derived mappings. The CAS blobs become unreferenced
+    /// and are the horizon sweeper's to collect — the index is a cache,
+    /// and this is the one place the cache intentionally forgets.
+    /// Returns how many assets were destroyed.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn trash_empty(&self) -> Result<u64, IndexError> {
+        let doomed: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT address FROM assets WHERE trashed_at IS NOT NULL")?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for address in &doomed {
+            self.conn.execute(
+                "DELETE FROM album_assets WHERE address = ?1",
+                rusqlite::params![address],
+            )?;
+            self.conn.execute(
+                "DELETE FROM derived WHERE source = ?1",
+                rusqlite::params![address],
+            )?;
+            self.conn.execute(
+                "DELETE FROM assets WHERE address = ?1",
+                rusqlite::params![address],
+            )?;
+        }
+        Ok(doomed.len() as u64)
+    }
+
     /// Asset counts by kind — what the app's backup screen displays:
     /// `(images, videos, total)`.
     ///
@@ -342,7 +469,8 @@ impl Index {
                     count(*) FILTER (WHERE duration_ms IS NULL),
                     count(*) FILTER (WHERE duration_ms IS NOT NULL),
                     count(*)
-                 FROM assets",
+                 FROM assets
+                 WHERE trashed_at IS NULL",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -367,7 +495,7 @@ impl Index {
     ) -> Result<Vec<AssetRecord>, IndexError> {
         // Placeholders are numbered in binding order; user input is always
         // a bound value, never SQL text.
-        let mut clauses: Vec<String> = Vec::new();
+        let mut clauses: Vec<String> = vec!["trashed_at IS NULL".into()];
         let mut next = 1usize;
         if name.is_some() {
             clauses.push(format!("file_name LIKE '%' || ?{next} || '%'"));
@@ -442,6 +570,7 @@ impl Index {
             "SELECT COALESCE(substr(taken_at, 1, 10), '1970-01-01') AS day,
                     count(*) AS n
              FROM assets
+             WHERE trashed_at IS NULL
              GROUP BY day
              ORDER BY day DESC",
         )?;
@@ -461,7 +590,8 @@ impl Index {
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
              FROM assets
-             WHERE COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
+             WHERE trashed_at IS NULL
+               AND COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
              ORDER BY substr(taken_at, 12, 8) DESC, address ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![day], |row| {
@@ -624,6 +754,7 @@ impl Index {
              FROM album_assets m
              JOIN assets ON assets.address = m.address
              WHERE m.album_id = ?1
+               AND assets.trashed_at IS NULL
              ORDER BY m.added_at ASC, m.address ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -885,6 +1016,7 @@ impl Index {
                     is_favorite, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
              FROM assets
              WHERE taken_at IS NOT NULL
+               AND trashed_at IS NULL
                AND substr(taken_at, 6, 2) = ?1
                AND substr(taken_at, 9, 2) = ?2
                AND year < ?3
@@ -931,7 +1063,11 @@ impl Index {
     /// [`IndexError`] on database failure.
     pub fn count(&self) -> Result<u64, IndexError> {
         self.conn
-            .query_row("SELECT count(*) FROM assets", [], |row| row.get(0))
+            .query_row(
+                "SELECT count(*) FROM assets WHERE trashed_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
             .map_err(IndexError::from)
     }
 }
@@ -945,6 +1081,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
         "ALTER TABLE assets ADD COLUMN sha1 TEXT",
         "ALTER TABLE assets ADD COLUMN thumbhash TEXT",
         "ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE assets ADD COLUMN trashed_at TEXT",
     ];
     for sql in migrations {
         let result = conn.execute_batch(sql);
@@ -978,7 +1115,8 @@ CREATE TABLE IF NOT EXISTS assets (
     file_name  TEXT,
     sha1       TEXT,
     thumbhash  TEXT,
-    is_favorite INTEGER NOT NULL DEFAULT 0
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    trashed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 

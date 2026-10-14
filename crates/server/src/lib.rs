@@ -146,7 +146,10 @@ pub fn build_router(state: AppState) -> axum::Router {
     // alias for native clients. One endpoint, one truth.
     let native = axum::Router::new()
         .route("/api/timeline", get(timeline))
-        .route("/api/assets", post(upload_dispatch))
+        .route(
+            "/api/assets",
+            post(upload_dispatch).delete(crate::immich::delete_assets),
+        )
         .with_state(state.clone());
     native.merge(crate::immich::immich_router(state))
 }
