@@ -12,6 +12,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use chrono::Datelike as _;
 use tower::ServiceExt as _;
 
 fn app_with_user(email: &str) -> (tempfile::TempDir, axum::Router, String) {
@@ -685,4 +686,52 @@ async fn asset_detail_returns_the_full_record_shaped_like_immich() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn memories_surface_assets_from_this_day_in_past_years() {
+    let (dir, mut router, token) = app_with_user("wyatt@example.com");
+    let asset = upload_bytes(&mut router, &token, "memory.png", &real_png(300, 150)).await;
+
+    // Seed a capture date two years ago today, through the same index file
+    // the router's AppState holds open (WAL allows the second connection).
+    let today = chrono::Utc::now();
+    let past = format!(
+        "{:04}-{:02}-{:02}T14:30:00",
+        today.year() - 2,
+        today.month(),
+        today.day()
+    );
+    rusqlite::Connection::open(dir.path().join("index.db"))
+        .expect("opens")
+        .execute(
+            "UPDATE assets SET taken_at = ?1 WHERE address = ?2",
+            rusqlite::params![past, asset],
+        )
+        .expect("seed");
+
+    let (status, memories) = send(&mut router, "GET", "/api/memories", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{memories}");
+    let list = memories.as_array().expect("array");
+    assert_eq!(list.len(), 1, "one year group");
+    let memory = &list[0];
+    assert_eq!(memory["type"], "on_this_day");
+    assert_eq!(memory["data"]["yearAgo"], 2);
+    assert_eq!(memory["isSaved"], false);
+    let assets = memory["assets"].as_array().expect("assets");
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0]["id"], asset);
+    assert_eq!(assets[0]["localDateTime"], past);
+}
+
+#[tokio::test]
+async fn memories_of_untagged_assets_are_empty_not_invented() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    upload_bytes(&mut router, &token, "no-exif.png", &real_png(120, 80)).await;
+    let (status, memories) = send(&mut router, "GET", "/api/memories", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        memories.as_array().expect("array").is_empty(),
+        "an asset without a capture date is not a memory; a guess would be a lie with a timestamp"
+    );
 }

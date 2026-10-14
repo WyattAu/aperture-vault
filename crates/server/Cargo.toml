@@ -24,6 +24,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
+rusqlite = "0.32"
 sha1 = "0.10"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"

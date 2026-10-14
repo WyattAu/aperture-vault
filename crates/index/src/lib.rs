@@ -744,6 +744,63 @@ impl Index {
             .map_err(IndexError::from)
     }
 
+    /// Assets captured on `month`/`day` in *previous* years — the "on this
+    /// day" material — newest year first. Assets without capture dates are
+    /// not memories: a guess would be a lie with a timestamp.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn on_this_day(
+        &self,
+        month: u32,
+        day: u32,
+        current_year: u32,
+    ) -> Result<Vec<(u32, Vec<AssetRecord>)>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, width, height, taken_at, make, model,
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash,
+                    CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
+             FROM assets
+             WHERE taken_at IS NOT NULL
+               AND substr(taken_at, 6, 2) = ?1
+               AND substr(taken_at, 9, 2) = ?2
+               AND year < ?3
+             ORDER BY taken_at DESC",
+        )?;
+        let month_str = format!("{month:02}");
+        let day_str = format!("{day:02}");
+        let rows = stmt.query_map(rusqlite::params![month_str, day_str, current_year], |row| {
+            Ok((
+                AssetRecord {
+                    address: row.get(0)?,
+                    width: row.get(1)?,
+                    height: row.get(2)?,
+                    taken_at: row.get(3)?,
+                    make: row.get(4)?,
+                    model: row.get(5)?,
+                    latitude: row.get(6)?,
+                    longitude: row.get(7)?,
+                    duration_ms: row.get(8)?,
+                    byte_len: row.get(9)?,
+                    file_name: row.get(10)?,
+                    sha1: row.get(11)?,
+                    thumbhash: row.get(12)?,
+                },
+                row.get::<_, u32>(13)?,
+            ))
+        })?;
+        let rows: Vec<(AssetRecord, u32)> = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut groups: Vec<(u32, Vec<AssetRecord>)> = Vec::new();
+        for (record, year) in rows {
+            match groups.last_mut() {
+                Some((y, list)) if *y == year => list.push(record),
+                _ => groups.push((year, vec![record])),
+            }
+        }
+        Ok(groups)
+    }
+
     /// How many assets the index knows.
     ///
     /// # Errors

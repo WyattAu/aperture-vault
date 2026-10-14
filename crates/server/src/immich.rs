@@ -7,6 +7,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use chrono::Datelike as _;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -851,6 +852,47 @@ pub async fn shared_album(
     json_ok(&dto)
 }
 
+/// `GET /api/memories` — "on this day": assets captured on today's month
+/// and day in previous years, one memory per year, newest first. Pure
+/// index arithmetic — no ML, no models, a calendar query that was sitting
+/// in the EXIF all along. Assets without capture dates are never memories.
+pub async fn memories(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    let owner = require_user(&state, &headers)?;
+    let now = chrono::Utc::now();
+    let (month, day, year) = (now.month(), now.day(), now.year() as u32);
+    let groups = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .on_this_day(month, day, year)
+        .map_err(|_| ApiError::Internal)?;
+    let today = now.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let items = groups
+        .into_iter()
+        .map(|(taken_year, assets)| {
+            let years_ago = year - taken_year;
+            let memory_at = format!("{taken_year:04}-{month:02}-{day:02}T00:00:00");
+            let dtos: Vec<_> = assets.iter().map(|a| asset_json(a, &owner, "")).collect();
+            json!({
+                "id": format!("onthisday-{taken_year:04}"),
+                "createdAt": today,
+                "updatedAt": today,
+                "memoryAt": memory_at,
+                "showAt": memory_at,
+                "seenAt": serde_json::Value::Null,
+                "hideAt": serde_json::Value::Null,
+                "deletedAt": serde_json::Value::Null,
+                "isSaved": false,
+                "ownerId": owner,
+                "type": "on_this_day",
+                "data": { "type": "onThisDay", "yearAgo": years_ago },
+                "assets": dtos,
+            })
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(items))
+}
+
 /// Immich's `AssetResponseDto` from the vault's own record — the detail
 /// view the app opens per photo. Featureless fields carry their neutral
 /// values (`isFavorite: false`, `isTrashed: false`): the shape is complete,
@@ -972,5 +1014,6 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/shared-links/me", get(shared_album))
         .route("/api/shared-links/{id}", delete(delete_share))
         .route("/api/assets/{id}", get(asset_detail))
+        .route("/api/memories", get(memories))
         .with_state(state)
 }

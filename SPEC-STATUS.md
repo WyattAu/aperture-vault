@@ -119,6 +119,13 @@
   into Immich's `GET /api/assets/{id}/original`: one bytes path, one
   detail path, no overlapping captures for axum to trip over.
 
+- **Memories ("on this day")** — the feature that looks like ML and is
+  actually a calendar query. `GET /api/memories` groups assets captured on
+  today's month/day in previous years, one memory per year, newest first,
+  Immich's `on_this_day` shape with `yearAgo`. The rule the tests pin:
+  assets without capture dates are never memories — a guess would be a
+  lie with a timestamp. Pure index arithmetic; the EXIF had it all along.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
