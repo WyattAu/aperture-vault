@@ -435,3 +435,88 @@ async fn timeline_buckets_and_bucket_match_the_immich_shapes() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn albums_create_add_list_and_delete_with_their_assets_surviving() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let first = upload_bytes(&mut router, &token, "one.png", &real_png(200, 100)).await;
+    let second = upload_bytes(&mut router, &token, "two.png", &real_png(100, 200)).await;
+
+    // Create, seeded with one asset; the phantom id names nothing and is skipped.
+    let body = serde_json::json!({
+        "albumName": "Holiday",
+        "description": "selected",
+        "assetIds": [first, "phantom"],
+    })
+    .to_string();
+    let (status, album) = send(
+        &mut router,
+        "POST",
+        "/api/albums",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{album}");
+    assert_eq!(album["albumName"], "Holiday");
+    assert_eq!(album["assetCount"], 1);
+    assert_eq!(album["albumThumbnailAssetId"], first);
+    assert_eq!(album["shared"], false);
+    let album_id = album["id"].as_str().expect("id").to_string();
+
+    // Add the second asset; each id reports its own outcome.
+    let body = serde_json::json!({ "ids": [second, "ghost"] }).to_string();
+    let (status, results) = send(
+        &mut router,
+        "PUT",
+        &format!("/api/albums/{album_id}/assets"),
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = results.as_array().expect("array");
+    assert_eq!(results[0]["id"], second);
+    assert_eq!(results[0]["success"], true);
+    assert_eq!(results[1]["success"], false, "the ghost names no asset");
+
+    // The listing shows both members and the full shape Immich reads.
+    let (_, list) = send(&mut router, "GET", "/api/albums", Some(&token), None).await;
+    let list = list.as_array().expect("array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["assetCount"], 2);
+    assert_eq!(list[0]["albumUsers"], serde_json::json!([]));
+
+    // Delete the album; its assets survive.
+    let (status, _) = send(
+        &mut router,
+        "DELETE",
+        &format!("/api/albums/{album_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{first}/original"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "assets outlive their album");
+    let (status, list) = send(&mut router, "GET", "/api/albums", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        list.as_array().expect("array").is_empty(),
+        "the album is gone"
+    );
+}
+
+#[tokio::test]
+async fn album_endpoints_require_a_token() {
+    let (_dir, mut router, _token) = app_with_user("wyatt@example.com");
+    let (status, _) = send(&mut router, "GET", "/api/albums", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

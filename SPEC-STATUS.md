@@ -67,6 +67,17 @@
   with honest empty columns (thumbhash, city, country) where features
   do not exist yet.
 
+- **Albums** — the app's album screens, grounded in the same OpenAPI spec:
+  `GET/POST /api/albums`, `GET/PATCH/DELETE /api/albums/{id}`,
+  `PUT/DELETE /api/albums/{id}/assets` with Immich's per-id
+  `BulkIdResponseDto` outcomes. The index owns the truth: an `albums`
+  table and an `album_assets` join table, ids from SQLite's own
+  `randomblob`, covers from the first member added. The invariants the
+  tests pin: an album is a *view* over assets — it never gains phantom
+  members, deleting it never touches bytes, and re-adding a member is not
+  double membership. Sharing fields (`albumUsers`, `shared`) ship at their
+  neutral values: shape-complete, feature-honest.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
@@ -83,10 +94,9 @@ estate CI gate, `salting` + `tokenkit` from crates.io (the same pins
    decision above this repository.
 2. **Auth is session+share only** — no OAuth, no email flows. The JWT
    substrate makes adding them mechanical.
-5. **Albums** (`/api/albums`) and **thumbhash/blurhash** are the next
-   Immich surface gaps: backup itself works end to end (connect, checksum
-   dedup, upload, gallery buckets, originals, thumbnails), but the app's
-   album screens and blur placeholders still have nothing to talk to.
+5. **thumbhash/blurhash** is the remaining Immich surface gap that
+   matters visually: backup, gallery, and albums work end to end; blur
+   placeholders still render as nothing.
 3. **Thumbnails** (M4) ship for stills; **video poster frames and
    transcodes** are the honest future case for worker-kit — a queue earns
    its weight when generation is slow, and video is. Derived stills are

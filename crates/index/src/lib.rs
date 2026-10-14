@@ -24,6 +24,54 @@ pub struct Index {
     conn: Connection,
 }
 
+/// One album: a user-curated, named group of asset addresses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumRecord {
+    /// Opaque album id (SQLite `randomblob` hex).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Free-text description, empty when none.
+    pub description: String,
+    /// Creation time, `YYYY-MM-DDTHH:MM:SS`.
+    pub created_at: String,
+    /// Last membership or rename change.
+    pub updated_at: String,
+    /// How many assets are members.
+    pub asset_count: u64,
+    /// The address shown as the album's cover: the first member added.
+    pub thumbnail_address: Option<String>,
+}
+
+/// Local wall-clock time in the index's `YYYY-MM-DDTHH:MM:SS` format — the
+/// same shape EXIF `taken_at` is stored in, so album timestamps sort beside
+/// capture timestamps without a second convention.
+fn timestamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    // Days since epoch -> civil date, Howard Hinnant's algorithm; the leap
+    // handling is the well-known one, no external time dependency.
+    let days = now.as_secs() / 86_400;
+    let secs_of_day = now.as_secs() % 86_400;
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let (hh, mm, ss) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}")
+}
+
 /// One asset record, as stored and returned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssetRecord {
@@ -322,6 +370,221 @@ impl Index {
             })
     }
 
+    /// Create an album, optionally seeded with assets. The id is SQLite's
+    /// own randomness (`randomblob`), because the index already trusts the
+    /// database for uniqueness everywhere else. Asset ids that name nothing
+    /// are skipped: an album is a view over existing assets, never a
+    /// place where phantom members are invented.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn create_album(
+        &self,
+        name: &str,
+        description: &str,
+        asset_ids: &[String],
+    ) -> Result<AlbumRecord, IndexError> {
+        let now = timestamp_now();
+        self.conn.execute(
+            "INSERT INTO albums (id, name, description, created_at, updated_at)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?3)",
+            rusqlite::params![name, description, now],
+        )?;
+        let id: String = self
+            .conn
+            .query_row(
+                "SELECT id FROM albums WHERE created_at = ?1 AND name = ?2
+                 ORDER BY rowid DESC LIMIT 1",
+                rusqlite::params![now, name],
+                |row| row.get(0),
+            )
+            .map_err(IndexError::from)?;
+        for address in asset_ids {
+            self.conn.execute(
+                "INSERT INTO album_assets (album_id, address, added_at)
+                 SELECT ?1, address, ?3 FROM assets WHERE address = ?2",
+                rusqlite::params![id, address, now],
+            )?;
+        }
+        self.album(&id)?
+            .ok_or(IndexError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Every album, newest activity first, with asset counts.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn albums(&self) -> Result<Vec<AlbumRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.name, a.description, a.created_at, a.updated_at,
+                    count(m.address),
+                    (SELECT m2.address FROM album_assets m2
+                     WHERE m2.album_id = a.id ORDER BY m2.added_at ASC, m2.address ASC LIMIT 1)
+             FROM albums a
+             LEFT JOIN album_assets m ON m.album_id = a.id
+             GROUP BY a.id
+             ORDER BY a.updated_at DESC, a.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AlbumRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                asset_count: row.get::<_, u64>(5)?,
+                thumbnail_address: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// One album by id, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album(&self, id: &str) -> Result<Option<AlbumRecord>, IndexError> {
+        self.albums()
+            .map(|all| all.into_iter().find(|a| a.id == id))
+    }
+
+    /// An album's assets, in the order they were added — the order Immich
+    /// clients display.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_assets(&self, id: &str) -> Result<Vec<AssetRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT assets.address, assets.width, assets.height, assets.taken_at,
+                    assets.make, assets.model, assets.latitude, assets.longitude,
+                    assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1
+             FROM album_assets m
+             JOIN assets ON assets.address = m.address
+             WHERE m.album_id = ?1
+             ORDER BY m.added_at ASC, m.address ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok(AssetRecord {
+                address: row.get(0)?,
+                width: row.get(1)?,
+                height: row.get(2)?,
+                taken_at: row.get(3)?,
+                make: row.get(4)?,
+                model: row.get(5)?,
+                latitude: row.get(6)?,
+                longitude: row.get(7)?,
+                duration_ms: row.get(8)?,
+                byte_len: row.get(9)?,
+                file_name: row.get(10)?,
+                sha1: row.get(11)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// Add assets to an album. Returns each id with whether it was newly
+    /// added; ids that name no asset report `false` — the album never gains
+    /// a phantom member.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_add_assets(
+        &self,
+        id: &str,
+        addresses: &[String],
+    ) -> Result<Vec<(String, bool)>, IndexError> {
+        let now = timestamp_now();
+        let mut out = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let added = self.conn.execute(
+                "INSERT INTO album_assets (album_id, address, added_at)
+                 SELECT ?1, a.address, ?3 FROM assets a WHERE a.address = ?2
+                 ON CONFLICT(album_id, address) DO NOTHING",
+                rusqlite::params![id, address, now],
+            )?;
+            out.push((address.clone(), added > 0));
+        }
+        self.conn.execute(
+            "UPDATE albums SET updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
+        Ok(out)
+    }
+
+    /// Remove assets from an album. Returns each id with whether it was a
+    /// member. The assets themselves are untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_remove_assets(
+        &self,
+        id: &str,
+        addresses: &[String],
+    ) -> Result<Vec<(String, bool)>, IndexError> {
+        let mut out = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let removed = self.conn.execute(
+                "DELETE FROM album_assets WHERE album_id = ?1 AND address = ?2",
+                rusqlite::params![id, address],
+            )?;
+            out.push((address.clone(), removed > 0));
+        }
+        Ok(out)
+    }
+
+    /// Delete an album. Membership rows go with it; the assets do not.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_delete(&self, id: &str) -> Result<bool, IndexError> {
+        self.conn.execute(
+            "DELETE FROM album_assets WHERE album_id = ?1",
+            rusqlite::params![id],
+        )?;
+        let gone = self
+            .conn
+            .execute("DELETE FROM albums WHERE id = ?1", rusqlite::params![id])?;
+        Ok(gone > 0)
+    }
+
+    /// Rename an album and/or change its description; `None` leaves a field
+    /// as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_update(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Option<AlbumRecord>, IndexError> {
+        let now = timestamp_now();
+        if let Some(name) = name {
+            self.conn.execute(
+                "UPDATE albums SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, name, now],
+            )?;
+        }
+        if let Some(description) = description {
+            self.conn.execute(
+                "UPDATE albums SET description = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, description, now],
+            )?;
+        }
+        self.album(id)
+    }
+
     /// How many assets the index knows.
     ///
     /// # Errors
@@ -384,6 +647,23 @@ CREATE TABLE IF NOT EXISTS derived (
     address TEXT NOT NULL,
     PRIMARY KEY (source, spec)
 );
+
+-- Albums: user-curated sets of assets. Membership is a join table, so an
+-- asset can live in many albums and deleting an album never touches the
+-- assets — the CAS owns the bytes, albums only name groups of them.
+CREATE TABLE IF NOT EXISTS albums (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS album_assets (
+    album_id  TEXT NOT NULL,
+    address   TEXT NOT NULL,
+    added_at  TEXT NOT NULL,
+    PRIMARY KEY (album_id, address)
+);
 ";
 
 /// Indexes that reference columns added by migrations; applied after
@@ -392,7 +672,6 @@ CREATE TABLE IF NOT EXISTS derived (
 const POST_MIGRATION_SCHEMA: &str = "
 CREATE INDEX IF NOT EXISTS assets_sha1 ON assets(sha1);
 ";
-
 /// Errors from the index.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

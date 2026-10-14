@@ -423,11 +423,227 @@ pub async fn timeline_bucket(
     json_ok(&columnar(&assets, &user_id))
 }
 
+/// Immich's `AlbumResponseDto`, from the vault's own record. Fields for
+/// sharing, users, and activity are present with their neutral values —
+/// the album endpoints must be shape-complete even where the feature is
+/// honest about not existing.
+#[allow(clippy::too_many_lines)]
+fn album_json(album: &aperture_index::AlbumRecord) -> serde_json::Value {
+    json!({
+        "id": album.id,
+        "albumName": album.name,
+        "description": album.description,
+        "createdAt": album.created_at,
+        "updatedAt": album.updated_at,
+        "assetCount": album.asset_count,
+        "albumThumbnailAssetId": album.thumbnail_address.clone().unwrap_or_default(),
+        "albumUsers": [],
+        "shared": false,
+        "hasSharedLink": false,
+        "isActivityEnabled": false,
+        "order": "asc",
+        "startDate": "",
+        "endDate": "",
+        "lastModifiedAssetTimestamp": "",
+    })
+}
+
+/// `GET /api/albums` — every album, newest activity first.
+pub async fn albums(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    require_user(&state, &headers)?;
+    let all = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .albums()
+        .map_err(|_| ApiError::Internal)?;
+    json_ok(&serde_json::Value::Array(
+        all.iter().map(album_json).collect(),
+    ))
+}
+
+/// `POST /api/albums` — create an album, optionally seeded with assets the
+/// client names by id.
+pub async fn create_album(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "albumName")]
+        album_name: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(rename = "assetIds", default)]
+        asset_ids: Vec<String>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let album = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .create_album(
+            &req.album_name,
+            req.description.as_deref().unwrap_or_default(),
+            &req.asset_ids,
+        )
+        .map_err(|_| ApiError::Internal)?;
+    json_created(&album_json(&album))
+}
+
+/// `GET /api/albums/{id}` — one album.
+pub async fn album(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let found = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .album(&id)
+        .map_err(|_| ApiError::Internal)?;
+    match found {
+        Some(album) => json_ok(&album_json(&album)),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+/// `PATCH /api/albums/{id}` — rename or re-describe.
+pub async fn update_album(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "albumName")]
+        album_name: Option<String>,
+        description: Option<String>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let updated = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .album_update(&id, req.album_name.as_deref(), req.description.as_deref())
+        .map_err(|_| ApiError::Internal)?;
+    match updated {
+        Some(album) => json_ok(&album_json(&album)),
+        None => Err(ApiError::NotFound),
+    }
+}
+
+/// `DELETE /api/albums/{id}` — the album goes, its assets stay.
+pub async fn delete_album(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let gone = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .album_delete(&id)
+        .map_err(|_| ApiError::Internal)?;
+    if gone {
+        json_ok(&json!({ "success": true }))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+/// The shared `{ids: [...]}` body of the bulk membership endpoints.
+#[derive(serde::Deserialize)]
+struct BulkIds {
+    ids: Vec<String>,
+}
+
+/// `PUT /api/albums/{id}/assets` — add members; each id reports its own
+/// outcome, so one bad id cannot sink a bulk request.
+pub async fn album_add_assets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let req: BulkIds =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let exists = index.album(&id).map_err(|_| ApiError::Internal)?.is_some();
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+    let outcomes = index
+        .album_add_assets(&id, &req.ids)
+        .map_err(|_| ApiError::Internal)?;
+    let results = outcomes
+        .into_iter()
+        .map(|(asset_id, success)| {
+            if success {
+                json!({ "id": asset_id, "success": true })
+            } else {
+                json!({
+                    "id": asset_id,
+                    "success": false,
+                    "error": "not_found",
+                    "errorMessage": "no asset with this id",
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(results))
+}
+
+/// `DELETE /api/albums/{id}/assets` — remove members; assets stay in the
+/// vault.
+pub async fn album_remove_assets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let req: BulkIds =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let outcomes = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .album_remove_assets(&id, &req.ids)
+        .map_err(|_| ApiError::Internal)?;
+    let results = outcomes
+        .into_iter()
+        .map(|(asset_id, success)| {
+            if success {
+                json!({ "id": asset_id, "success": true })
+            } else {
+                json!({
+                    "id": asset_id,
+                    "success": false,
+                    "error": "not_found",
+                    "errorMessage": "asset was not a member",
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(results))
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
 pub fn immich_router(state: AppState) -> axum::Router {
-    use axum::routing::{get, post};
+    use axum::routing::{get, post, put};
     axum::Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/validateToken", post(validate_token))
@@ -441,5 +657,14 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/assets/bulk-upload-check", post(bulk_upload_check))
         .route("/api/timeline/buckets", get(timeline_buckets))
         .route("/api/timeline/bucket", get(timeline_bucket))
+        .route("/api/albums", get(albums).post(create_album))
+        .route(
+            "/api/albums/{id}",
+            get(album).patch(update_album).delete(delete_album),
+        )
+        .route(
+            "/api/albums/{id}/assets",
+            put(album_add_assets).delete(album_remove_assets),
+        )
         .with_state(state)
 }

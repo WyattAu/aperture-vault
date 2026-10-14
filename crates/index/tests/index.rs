@@ -213,6 +213,83 @@ fn an_index_created_before_sha1_migrates_in_place() {
 }
 
 #[test]
+fn albums_are_views_over_assets_and_own_nothing() {
+    let (_dir, index) = file_index();
+    index
+        .record_asset(&record("a", Some("2026-01-01T08:00:00"), "a.jpg"))
+        .expect("record");
+    index
+        .record_asset(&record("b", Some("2026-01-01T19:00:00"), "b.jpg"))
+        .expect("record");
+
+    let album = index
+        .create_album(
+            "Holiday",
+            "Selected shots",
+            &["a".into(), "b".into(), "phantom".into()],
+        )
+        .expect("create");
+    assert_eq!(album.asset_count, 2, "the phantom id named no asset");
+    assert_eq!(
+        album.thumbnail_address.as_deref(),
+        Some("a"),
+        "first member added is the cover"
+    );
+
+    // Members come back in the order they were added, full records.
+    let members = index.album_assets(&album.id).expect("members");
+    assert_eq!(
+        members
+            .iter()
+            .map(|r| r.address.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+
+    // Re-adding is not double membership.
+    let outcomes = index
+        .album_add_assets(&album.id, &["a".into(), "b".into()])
+        .expect("add");
+    assert_eq!(outcomes, vec![("a".into(), false), ("b".into(), false)]);
+    assert_eq!(
+        index
+            .album(&album.id)
+            .expect("album")
+            .expect("the album exists")
+            .asset_count,
+        2
+    );
+
+    // Removal reports membership truth; the assets themselves stay.
+    let removed = index
+        .album_remove_assets(&album.id, &["a".into(), "zz".into()])
+        .expect("remove");
+    assert_eq!(removed, vec![("a".into(), true), ("zz".into(), false)]);
+    assert!(
+        index.asset("a").expect("query").is_some(),
+        "removal keeps the asset"
+    );
+
+    // Rename touches only the album.
+    let renamed = index
+        .album_update(&album.id, Some("Holiday 2026"), None)
+        .expect("rename")
+        .expect("album exists");
+    assert_eq!(renamed.name, "Holiday 2026");
+    assert_eq!(renamed.asset_count, 1);
+
+    // Delete the album: memberships go, assets remain.
+    assert!(index.album_delete(&album.id).expect("delete"));
+    assert_eq!(index.album(&album.id).expect("query"), None);
+    assert_eq!(
+        index.count().expect("count"),
+        2,
+        "assets outlive their album"
+    );
+    assert!(index.album_assets(&album.id).expect("members").is_empty());
+}
+
+#[test]
 fn buckets_group_by_capture_day_newest_first() {
     let (_dir, index) = file_index();
     index
