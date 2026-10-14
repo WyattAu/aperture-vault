@@ -536,3 +536,99 @@ async fn album_endpoints_require_a_token() {
     let (status, _) = send(&mut router, "GET", "/api/albums", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn share_links_expose_an_album_publicly_until_revoked() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let asset = upload_bytes(&mut router, &token, "shared.png", &real_png(300, 150)).await;
+    let outside = upload_bytes(&mut router, &token, "private.png", &real_png(140, 90)).await;
+
+    // Share the album that holds `asset`.
+    let body = serde_json::json!({ "albumName": "Public", "assetIds": [asset] }).to_string();
+    let (_, album) = send(
+        &mut router,
+        "POST",
+        "/api/albums",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    let album_id = album["id"].as_str().expect("id").to_string();
+
+    let body = serde_json::json!({ "albumId": album_id }).to_string();
+    let (status, link) = send(
+        &mut router,
+        "POST",
+        "/api/shared-links",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    assert_eq!(link["type"], "ALBUM");
+    assert_eq!(link["album"]["albumName"], "Public");
+    assert!(
+        link["key"].as_str().is_some(),
+        "the owner gets the key back"
+    );
+    let share_id = link["id"].as_str().expect("id").to_string();
+    let key = link["key"].as_str().expect("key").to_string();
+
+    // The public face: album + member ids, no session.
+    let uri = format!("/api/shared-links/me?key={key}");
+    let (status, shared) = send(&mut router, "GET", &uri, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shared["album"]["id"], album_id);
+    assert_eq!(shared["assets"][0], asset);
+
+    // A share key reaches members through the asset endpoints…
+    let uri = format!("/api/assets/{asset}/thumbnail?key={key}");
+    let request = Request::builder()
+        .uri(&uri)
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+    // …and nothing else.
+    let uri = format!("/api/assets/{outside}/thumbnail?key={key}");
+    let request = Request::builder()
+        .uri(&uri)
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // A session token is not a share key, and a share key is not a session:
+    // the roles are distinct by construction.
+    let uri = format!("/api/assets/{asset}/thumbnail?key={token}");
+    let request = Request::builder()
+        .uri(&uri)
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The owner lists and revokes.
+    let (_, list) = send(&mut router, "GET", "/api/shared-links", Some(&token), None).await;
+    assert_eq!(list.as_array().expect("array").len(), 1);
+    let (status, _) = send(
+        &mut router,
+        "DELETE",
+        &format!("/api/shared-links/{share_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Revoked: the key no longer opens anything, asset or album.
+    let uri = format!("/api/shared-links/me?key={key}");
+    let (status, _) = send(&mut router, "GET", &uri, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let uri = format!("/api/assets/{asset}/thumbnail?key={key}");
+    let request = Request::builder()
+        .uri(&uri)
+        .body(Body::empty())
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

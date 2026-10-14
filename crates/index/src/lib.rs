@@ -72,6 +72,21 @@ fn timestamp_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}")
 }
 
+/// One share link row: the revocable record behind a signed capability.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedLinkRecord {
+    /// Opaque row id (SQLite `randomblob` hex).
+    pub id: String,
+    /// The album the share exposes, read-only.
+    pub album_id: String,
+    /// The signed token (JWT, role `share`).
+    pub token: String,
+    /// Creation time, `YYYY-MM-DDTHH:MM:SS`.
+    pub created_at: String,
+    /// Expiry time, same format.
+    pub expires_at: String,
+}
+
 /// One asset record, as stored and returned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssetRecord {
@@ -607,6 +622,128 @@ impl Index {
         self.album(id)
     }
 
+    /// Create a share link row for an album. The signed token is minted by
+    /// the auth layer; this row is what makes it revocable — the key works
+    /// only while the row exists.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn share_create(
+        &self,
+        album_id: &str,
+        token: &str,
+        created_at: &str,
+        expires_at: &str,
+    ) -> Result<SharedLinkRecord, IndexError> {
+        self.conn.execute(
+            "INSERT INTO shared_links (id, album_id, token, created_at, expires_at)
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4)",
+            rusqlite::params![album_id, token, created_at, expires_at],
+        )?;
+        let id: String = self.conn.query_row(
+            "SELECT id FROM shared_links WHERE token = ?1",
+            rusqlite::params![token],
+            |row| row.get(0),
+        )?;
+        Ok(SharedLinkRecord {
+            id,
+            album_id: album_id.to_string(),
+            token: token.to_string(),
+            created_at: created_at.to_string(),
+            expires_at: expires_at.to_string(),
+        })
+    }
+
+    /// Every share link, newest first.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn shares(&self) -> Result<Vec<SharedLinkRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, album_id, token, created_at, expires_at
+             FROM shared_links ORDER BY created_at DESC, id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::read_share)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// One share link by row id, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn share(&self, id: &str) -> Result<Option<SharedLinkRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, album_id, token, created_at, expires_at
+             FROM shared_links WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], Self::read_share)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The share row a key belongs to, or `None` — the revocation check: a
+    /// cryptographically valid token whose row is gone is a revoked key.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn share_by_token(&self, token: &str) -> Result<Option<SharedLinkRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, album_id, token, created_at, expires_at
+             FROM shared_links WHERE token = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![token], Self::read_share)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    fn read_share(row: &rusqlite::Row<'_>) -> rusqlite::Result<SharedLinkRecord> {
+        Ok(SharedLinkRecord {
+            id: row.get(0)?,
+            album_id: row.get(1)?,
+            token: row.get(2)?,
+            created_at: row.get(3)?,
+            expires_at: row.get(4)?,
+        })
+    }
+
+    /// Delete a share link row: revocation.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn share_delete(&self, id: &str) -> Result<bool, IndexError> {
+        let gone = self.conn.execute(
+            "DELETE FROM shared_links WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(gone > 0)
+    }
+
+    /// Whether `address` is a member of `album_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn album_contains(&self, album_id: &str, address: &str) -> Result<bool, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM album_assets WHERE album_id = ?1 AND address = ?2",
+                rusqlite::params![album_id, address],
+                |row| row.get::<_, u64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(IndexError::from)
+    }
+
     /// How many assets the index knows.
     ///
     /// # Errors
@@ -689,6 +826,19 @@ CREATE TABLE IF NOT EXISTS album_assets (
     address   TEXT NOT NULL,
     added_at  TEXT NOT NULL,
     PRIMARY KEY (album_id, address)
+);
+
+-- Shared links: album-scoped, read-only, expiring. The JWT is the
+-- capability and validates cryptographically, but revocation must be
+-- possible, so the row is the source of truth: a share key works only
+-- while its row exists. One row per link; the token column holds the
+-- signed string so the owner can retrieve it again.
+CREATE TABLE IF NOT EXISTS shared_links (
+    id         TEXT PRIMARY KEY,
+    album_id   TEXT NOT NULL,
+    token      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 ";
 

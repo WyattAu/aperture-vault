@@ -147,12 +147,15 @@ pub(crate) async fn upload_asset_multipart(
 }
 
 /// `GET /api/assets/:id/original` — the original bytes, content type sniffed.
+/// A session works for any asset; a share key works for assets in the
+/// shared album — the read-only reach of the capability.
 pub async fn original(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
-    require_user(&state, &headers)?;
+    authorize_asset(&state, &headers, &id, params.get("key").map(String::as_str))?;
     let addr = crate::cas_address(&id)?;
     let bytes = state.store.get_bytes(&addr).map_err(|e| match e {
         aperture_cas::CasError::Missing { .. } => ApiError::NotFound,
@@ -162,11 +165,51 @@ pub async fn original(
     Ok(([(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response())
 }
 
+/// Session **or** share key: a session reaches every asset; a share key
+/// reaches exactly the assets of its album. Anything else is 401 —
+/// authorization failures do not distinguish reasons to a probe.
+fn authorize_asset(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    asset_id: &str,
+    key: Option<&str>,
+) -> Result<(), ApiError> {
+    if require_user(state, headers).is_ok() {
+        return Ok(());
+    }
+    let Some(key) = key else {
+        return Err(ApiError::Unauthorized);
+    };
+    let record = authorize_share(state, key)?;
+    let contains = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .album_contains(&record.album_id, asset_id)
+        .map_err(|_| ApiError::Internal)?;
+    if contains {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
 /// The `?size=` query the Immich apps send.
 #[derive(Debug, serde::Deserialize)]
 pub struct ThumbQuery {
     /// `thumbnail` (default) or `preview`.
     pub size: Option<String>,
+    /// The share key, when a public visitor fetches through a share.
+    #[serde(rename = "key")]
+    pub key: Option<String>,
+}
+
+impl ThumbQuery {
+    /// The share key, if any.
+    #[must_use]
+    pub fn share_key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
 }
 
 /// `GET /api/assets/:id/thumbnail` — the derived still a grid displays.
@@ -179,7 +222,7 @@ pub async fn thumbnail(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<ThumbQuery>,
 ) -> ApiResult {
-    require_user(&state, &headers)?;
+    authorize_asset(&state, &headers, &id, query.share_key())?;
     let size = match query.size.as_deref() {
         None | Some("thumbnail") => aperture_pipeline::thumb::ThumbSize::Thumbnail,
         Some("preview") => aperture_pipeline::thumb::ThumbSize::Preview,
@@ -642,11 +685,177 @@ pub async fn album_remove_assets(
     json_ok(&serde_json::Value::Array(results))
 }
 
+/// The vault's share model: album-scoped, read-only, expiring — exactly the
+/// capability the auth layer's tokenkit substrate mints, no more.
+fn share_json(
+    record: &aperture_index::SharedLinkRecord,
+    album: Option<&aperture_index::AlbumRecord>,
+) -> serde_json::Value {
+    json!({
+        "id": record.id,
+        "key": record.token,
+        "type": "ALBUM",
+        "createdAt": record.created_at,
+        "expiresAt": record.expires_at,
+        "description": "",
+        "userId": "",
+        "slug": "",
+        "password": "",
+        "allowDownload": true,
+        "allowUpload": false,
+        "showMetadata": true,
+        "assets": [],
+        "album": album.map(album_json),
+    })
+}
+
+/// `POST /api/shared-links` — share an album read-only. The body takes
+/// Immich's `albumId` and optional `expiresAt` (RFC 3339); without one the
+/// link lives seven days.
+pub async fn create_share(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "albumId")]
+        album_id: String,
+        #[serde(rename = "expiresAt")]
+        expires_at: Option<String>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let album = index
+        .album(&req.album_id)
+        .map_err(|_| ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+
+    let now = chrono::Utc::now();
+    let expires = match req.expires_at.as_deref() {
+        Some(iso) => chrono::DateTime::parse_from_rfc3339(iso)
+            .map_err(|e| ApiError::BadRequest(format!("expiresAt: {e}")))?
+            .with_timezone(&chrono::Utc),
+        None => now + chrono::Duration::days(7),
+    };
+    if expires <= now {
+        return Err(ApiError::BadRequest("expiresAt is in the past".into()));
+    }
+    let token = state
+        .auth
+        .issue_share_link(&req.album_id, (expires - now).num_seconds())
+        .map_err(|_| ApiError::Internal)?;
+    let fmt = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let record = index
+        .share_create(&req.album_id, &token, &fmt(now), &fmt(expires))
+        .map_err(|_| ApiError::Internal)?;
+    json_created(&share_json(&record, Some(&album)))
+}
+
+/// `GET /api/shared-links` — the owner's links, newest first.
+pub async fn shares(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    require_user(&state, &headers)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let all = index.shares().map_err(|_| ApiError::Internal)?;
+    let items = all
+        .iter()
+        .map(|record| {
+            let album = index.album(&record.album_id).ok().flatten();
+            share_json(record, album.as_ref())
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(items))
+}
+
+/// `DELETE /api/shared-links/{id}` — revoke. The signed token becomes
+/// worthless because its row is gone.
+pub async fn delete_share(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let gone = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .share_delete(&id)
+        .map_err(|_| ApiError::Internal)?;
+    if gone {
+        json_ok(&json!({ "success": true }))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+/// Validate a share key from a `?key=` query: the JWT must be a valid share
+/// token AND its row must still exist (revocation), and it must still be
+/// unexpired by the row's own clock.
+fn authorize_share(
+    state: &AppState,
+    key: &str,
+) -> Result<aperture_index::SharedLinkRecord, ApiError> {
+    let album_id = state
+        .auth
+        .validate_share_link(key)
+        .map_err(|_| ApiError::Unauthorized)?;
+    let record = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .share_by_token(key)
+        .map_err(|_| ApiError::Internal)?
+        .ok_or(ApiError::Unauthorized)?;
+    if record.album_id != album_id {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(record)
+}
+
+/// `GET /api/shared-links/me?key=` — the public face of a share: the album
+/// and its asset ids, no session required. A revoked, expired, or
+/// never-existing key is the same 401; a probe learns nothing.
+pub async fn shared_album(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = params.get("key").ok_or(ApiError::Unauthorized)?;
+    let record = authorize_share(&state, key)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let album = index
+        .album(&record.album_id)
+        .map_err(|_| ApiError::Internal)?
+        .ok_or(ApiError::NotFound)?;
+    let assets = index
+        .album_assets(&record.album_id)
+        .map_err(|_| ApiError::Internal)?;
+    let asset_ids: Vec<_> = assets.iter().map(|a| json!(a.address)).collect();
+    let dto = json!({
+        "id": record.id,
+        "key": record.token,
+        "type": "ALBUM",
+        "createdAt": record.created_at,
+        "expiresAt": record.expires_at,
+        "description": "",
+        "userId": "",
+        "slug": "",
+        "password": "",
+        "allowDownload": true,
+        "allowUpload": false,
+        "showMetadata": true,
+        "assets": asset_ids,
+        "album": album_json(&album),
+    });
+    json_ok(&dto)
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
 pub fn immich_router(state: AppState) -> axum::Router {
-    use axum::routing::{get, post, put};
+    use axum::routing::{delete, get, post, put};
     axum::Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/validateToken", post(validate_token))
@@ -669,5 +878,8 @@ pub fn immich_router(state: AppState) -> axum::Router {
             "/api/albums/{id}/assets",
             put(album_add_assets).delete(album_remove_assets),
         )
+        .route("/api/shared-links", post(create_share).get(shares))
+        .route("/api/shared-links/me", get(shared_album))
+        .route("/api/shared-links/{id}", delete(delete_share))
         .with_state(state)
 }

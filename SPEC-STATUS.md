@@ -99,6 +99,18 @@
   the columnar timeline (`thumbhash` column, honestly empty until the
   first derivation fills it) and is stored via an additive migration.
 
+- **Share links** — the auth layer's tokenkit capability was minted and
+  validated but served by nothing; now it is. `POST/GET /api/shared-links`
+  and `DELETE /api/shared-links/{id}` for the owner; `GET
+  /api/shared-links/me?key=` for the visitor — no session, album plus
+  member ids. The vault's share model is exactly the substrate's:
+  album-scoped, read-only, expiring. Revocation is real, not cosmetic:
+  the JWT validates cryptographically forever, so the row is the source
+  of truth — a key opens assets only while its row exists, and asset
+  endpoints accept session *or* share-key, the latter reaching exactly
+  the shared album's members. Roles are distinct by construction: a
+  session token is not a share key and never authenticates as one.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
