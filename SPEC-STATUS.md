@@ -1,4 +1,4 @@
-# Status — after the Immich-API milestone (2026-10-13)
+# Status — after the Immich backup-flow milestone (2026-10-14)
 
 ## Shipped
 
@@ -40,6 +40,33 @@
   aspect preserved, small originals never upscaled, non-images answered
   with the 404 that is literally true. Blurhash is an honest not-yet.
 
+- **M5 — planned as uring-kit under the CAS, refuted by measurement, pivoted
+  to the Immich backup flow.** The measurement (kept as
+  `crates/pipeline/examples/ingest_profile.rs`): a 100 MiB ingest spends
+  ~100 ms reading, ~50 ms hashing (BLAKE3), ~110 ms writing. io_uring
+  removes syscall *entry* cost — ~2 µs per op, ~6 ops per ingest — so its
+  ceiling on the whole path is ~12 µs of 266 ms, 0.0045%. The cost is the
+  page-cache copies, and the CAS must copy: BLAKE3 needs the bytes in
+  userspace to hash them. uring-kit stays what it is — a socket substrate
+  for shallow-poll edge serving, not a file-I/O accelerator.
+- **Immich backup flow, grounded in the real OpenAPI spec** (193 paths,
+  fetched from immich-app/immich): `GET /api/server/ping|features|config|
+  version` — the connect-time handshake, every feature flag stating only
+  what is true (password login yes, ML/OAuth/trash no), and the vault's
+  own version rather than a pretended Immich one. `POST /api/assets/
+  bulk-upload-check` — the call that makes backup resumable: the phone
+  sends SHA-1s, the vault answers duplicate-with-id or accept. Ingest now
+  computes SHA-1 in the same streaming pass as BLAKE3 (a hashing tee), and
+  the index gained the `sha1` column (with an in-place migration tested
+  against a real M2-era database) plus `asset_by_sha1`. SHA-1 is a compat
+  alias, never identity: the CAS stays BLAKE3-only. `POST /api/assets` now
+  returns Immich's `{id, status: created|duplicate}` — `duplicate` is
+  confirmation, not an error. `GET /api/timeline/buckets` and
+  `GET /api/timeline/bucket` serve the gallery in Immich's columnar shape
+  (position-aligned arrays), same capture-day rule as the native timeline,
+  with honest empty columns (thumbhash, city, country) where features
+  do not exist yet.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
@@ -56,8 +83,14 @@ estate CI gate, `salting` + `tokenkit` from crates.io (the same pins
    decision above this repository.
 2. **Auth is session+share only** — no OAuth, no email flows. The JWT
    substrate makes adding them mechanical.
+5. **Albums** (`/api/albums`) and **thumbhash/blurhash** are the next
+   Immich surface gaps: backup itself works end to end (connect, checksum
+   dedup, upload, gallery buckets, originals, thumbnails), but the app's
+   album screens and blur placeholders still have nothing to talk to.
 3. **Thumbnails** (M4) ship for stills; **video poster frames and
    transcodes** are the honest future case for worker-kit — a queue earns
    its weight when generation is slow, and video is. Derived stills are
    already addressable CAS blobs, so the storage needs no migration.
-4. **uring-kit** substrate (M5) unimplemented; std I/O today.
+4. **uring-kit** substrate: refuted for the CAS's file I/O by measurement
+   (see M5 above); its honest future use is the socket path, if the vault
+   ever outgrows axum/tokio for concurrent client serving.

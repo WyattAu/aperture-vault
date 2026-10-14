@@ -12,11 +12,13 @@ categories = ["multimedia"]
 [dependencies]
 aperture-cas = { version = "0.1", path = "../cas" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+sha1 = "0.10"
 aperture-probe = { version = "0.1", path = "../probe" }
 aperture-index = { version = "0.1", path = "../index" }
 thiserror = "2"
 
 [dev-dependencies]
+sha1 = "0.10"
 tempfile = "3"
 
 [lints.rust]

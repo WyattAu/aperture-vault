@@ -27,6 +27,7 @@ fn record(address: &str, taken_at: Option<&str>, name: &str) -> aperture_index::
         duration_ms: None,
         byte_len: 1000,
         file_name: Some(format!("{name}.jpg")),
+        sha1: None,
     }
 }
 
@@ -136,4 +137,113 @@ fn an_index_on_disk_survives_reopen() {
     // WAL mode leaves a -wal sidecar beside the database; its presence or
     // absence after a clean close is not asserted — only that the data
     // survived the reopen, which is the property that matters.
+}
+
+#[test]
+fn a_sha1_recorded_at_ingest_is_findable() {
+    let (_dir, index) = file_index();
+    // The pipeline records the checksum in the same insert as the asset —
+    // one ingest, one row carrying both content keys. (Re-recording an
+    // address is DO NOTHING, so a checksum cannot be smuggled in later.)
+    let mut with_sha1 = record("shot", Some("2026-03-01T12:00:00"), "shot.jpg");
+    with_sha1.sha1 = Some("a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0".into());
+    index.record_asset(&with_sha1).expect("record");
+
+    let found = index
+        .asset_by_sha1("a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0")
+        .expect("query");
+    assert_eq!(found.as_deref(), Some("shot"));
+    assert_eq!(
+        index
+            .asset_by_sha1("0000000000000000000000000000000000000000")
+            .expect("query"),
+        None,
+        "an unknown checksum is an unknown checksum"
+    );
+}
+
+#[test]
+fn an_index_created_before_sha1_migrates_in_place() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("index.db");
+    // The schema as the M2 release wrote it: no sha1 column.
+    rusqlite::Connection::open(&path)
+        .expect("opens")
+        .execute_batch(
+            "CREATE TABLE assets (
+                 address    TEXT PRIMARY KEY,
+                 width      INTEGER,
+                 height     INTEGER,
+                 taken_at   TEXT,
+                 make       TEXT,
+                 model      TEXT,
+                 latitude   REAL,
+                 longitude  REAL,
+                 duration_ms INTEGER,
+                 byte_len   INTEGER NOT NULL,
+                 file_name  TEXT
+             );
+             INSERT INTO assets (address, byte_len)
+             VALUES ('legacy', 5);",
+        )
+        .expect("old schema");
+    // Opening with the current code must widen, not reject.
+    let index = Index::open(&path).expect("opens a legacy database");
+    assert_eq!(index.count().expect("count"), 1, "old rows survive");
+    // The legacy row has no checksum — it predates the column, which is
+    // exactly what the bulk-upload-check endpoint answers `accept` to.
+    assert_eq!(
+        index
+            .asset_by_sha1("1234567890123456789012345678901234567890")
+            .expect("query"),
+        None,
+    );
+    // The widened column is usable for new rows.
+    let mut migrated = record("fresh", None, "new.jpg");
+    migrated.sha1 = Some("1234567890123456789012345678901234567890".into());
+    index
+        .record_asset(&migrated)
+        .expect("records into the new column");
+    assert_eq!(
+        index
+            .asset_by_sha1("1234567890123456789012345678901234567890")
+            .expect("query"),
+        Some("fresh".into()),
+    );
+}
+
+#[test]
+fn buckets_group_by_capture_day_newest_first() {
+    let (_dir, index) = file_index();
+    index
+        .record_asset(&record("a", Some("2026-01-01T08:00:00"), "a.jpg"))
+        .expect("record");
+    index
+        .record_asset(&record("b", Some("2026-01-01T19:00:00"), "b.jpg"))
+        .expect("record");
+    index
+        .record_asset(&record("c", Some("2025-12-25T10:00:00"), "c.jpg"))
+        .expect("record");
+    index
+        .record_asset(&record("d", None, "d.jpg"))
+        .expect("record");
+
+    let buckets = index.buckets().expect("buckets");
+    assert_eq!(
+        buckets,
+        vec![
+            ("2026-01-01".into(), 2),
+            ("2025-12-25".into(), 1),
+            ("1970-01-01".into(), 1),
+        ],
+        "newest day first; untagged assets fall to the sentinel day"
+    );
+
+    let day = index.assets_in_day("2026-01-01").expect("day");
+    assert_eq!(day.len(), 2);
+    assert_eq!(
+        day.first().map(|r| r.address.as_str()),
+        Some("b"),
+        "later capture first within the day"
+    );
 }

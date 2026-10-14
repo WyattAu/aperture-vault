@@ -157,11 +157,9 @@ async fn immich_multipart_upload_stores_the_asset() {
         .expect("body")
         .to_vec();
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-    assert_eq!(json["duplicate"], serde_json::Value::Bool(false));
+    assert_eq!(json["status"], "created", "Immich's upload status shape");
     let address = json["id"].as_str().expect("id").to_string();
 
-    // The original is fetchable through the Immich path by its content
-    // address, sniffed as PNG.
     let uri = format!("/api/assets/{address}/original");
     let request = Request::builder()
         .uri(&uri)
@@ -310,4 +308,130 @@ async fn immich_thumbnail_of_a_non_image_is_a_404() {
         .expect("request builds");
     let response = router.clone().oneshot(request).await.expect("responds");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn server_ping_pongs_without_authentication() {
+    let (_dir, mut router, _token) = app_with_user("wyatt@example.com");
+    let (status, json) = send(&mut router, "GET", "/api/server/ping", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["res"], "pong");
+}
+
+#[tokio::test]
+async fn server_features_and_config_state_only_what_is_true() {
+    let (_dir, mut router, _token) = app_with_user("wyatt@example.com");
+    let (_, features) = send(&mut router, "GET", "/api/server/features", None, None).await;
+    assert_eq!(features["passwordLogin"], serde_json::Value::Bool(true));
+    assert_eq!(
+        features["facialRecognition"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(features["oauth"], serde_json::Value::Bool(false));
+
+    let (_, config) = send(&mut router, "GET", "/api/server/config", None, None).await;
+    assert_eq!(config["isInitialized"], serde_json::Value::Bool(true));
+    assert_eq!(config["publicUsers"], serde_json::Value::Bool(false));
+
+    let (_, version) = send(&mut router, "GET", "/api/server/version", None, None).await;
+    // The vault's own version, not a pretended Immich version.
+    assert!(version["major"].is_u64());
+    assert!(version["minor"].is_u64());
+    assert!(version["patch"].is_u64());
+}
+
+#[tokio::test]
+async fn bulk_upload_check_answers_duplicate_for_known_checksums() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let png = real_png(320, 200);
+    let address = upload_bytes(&mut router, &token, "known.png", &png).await;
+
+    // The SHA-1 the pipeline recorded, computed independently here.
+    use sha1::Digest as _;
+    let digest: Vec<u8> = {
+        let mut h = sha1::Sha1::new();
+        h.update(&png);
+        h.finalize().to_vec()
+    };
+    let hex_form: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    use base64::Engine as _;
+    let b64_form = base64::engine::general_purpose::STANDARD.encode(&digest);
+
+    let body = serde_json::json!({
+        "assets": [
+            { "id": "client-1", "checksum": b64_form },
+            { "id": "client-2", "checksum": hex_form.to_uppercase() },
+            { "id": "client-3", "checksum": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+        ]
+    })
+    .to_string();
+    let (status, json) = send(
+        &mut router,
+        "POST",
+        "/api/assets/bulk-upload-check",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let results = json["results"].as_array().expect("results");
+    assert_eq!(results.len(), 3);
+    // Both encodings of the same checksum resolve to the stored asset.
+    assert_eq!(results[0]["action"], "reject");
+    assert_eq!(results[0]["reason"], "duplicate");
+    assert_eq!(results[0]["assetId"], address);
+    assert_eq!(results[1]["action"], "reject");
+    assert_eq!(results[1]["reason"], "duplicate");
+    // An unknown checksum means "upload it".
+    assert_eq!(results[2]["action"], "accept");
+}
+
+#[tokio::test]
+async fn timeline_buckets_and_bucket_match_the_immich_shapes() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let address = upload_bytes(&mut router, &token, "grid.png", &real_png(600, 400)).await;
+
+    let (status, buckets) = send(
+        &mut router,
+        "GET",
+        "/api/timeline/buckets",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = buckets.as_array().expect("array");
+    assert!(!list.is_empty(), "the uploaded asset made a bucket");
+    assert!(list[0]["timeBucket"].is_string());
+    assert_eq!(list[0]["count"].as_u64(), Some(1));
+    let day = list[0]["timeBucket"].as_str().expect("day").to_string();
+
+    // The columnar day fetch: every field is an array, position-aligned.
+    let uri = format!("/api/timeline/bucket?timeBucket={day}T00:00:00.000Z");
+    let (status, bucket) = send(&mut router, "GET", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{bucket}");
+    let ids = bucket["id"].as_array().expect("id array");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].as_str(), Some(address.as_str()));
+    assert_eq!(bucket["isImage"][0], serde_json::Value::Bool(true));
+    assert_eq!(bucket["visibility"][0], "timeline");
+    // Position alignment: every parallel array has the same length.
+    for (key, value) in bucket.as_object().expect("object") {
+        assert_eq!(
+            value.as_array().map(|a| a.len()),
+            Some(1),
+            "column {key} is position-aligned with id"
+        );
+    }
+
+    // A bucket without the required parameter is a 400, not a panic.
+    let (status, _) = send(
+        &mut router,
+        "GET",
+        "/api/timeline/bucket",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

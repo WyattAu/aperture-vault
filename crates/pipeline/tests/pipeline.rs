@@ -120,8 +120,34 @@ fn the_index_is_rebuildable_from_the_cas_alone() {
                 duration_ms: meta.duration_ms,
                 byte_len: bytes.len() as u64,
                 file_name: None,
+                sha1: None,
             })
             .expect("record");
     }
     assert_eq!(wiped.count().expect("count"), 2, "the index came back");
+}
+
+#[test]
+fn ingest_records_the_sha1_compat_checksum() {
+    let (_dir, store, index) = env();
+    let data = b"checksummed bytes".repeat(1000);
+
+    let report =
+        Pipeline::ingest(&store, &index, Cursor::new(&data), Some("c.jpg")).expect("ingest");
+
+    // Independent computation: the recorded checksum must be the real SHA-1
+    // of the bytes, lowercase hex — the form a client's base64 decodes to.
+    use sha1::Digest as _;
+    let expected = {
+        let mut h = sha1::Sha1::new();
+        h.update(&data);
+        h.finalize()
+    };
+    let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+
+    let record = index
+        .asset(&report.address.hex())
+        .expect("query")
+        .expect("recorded");
+    assert_eq!(record.sha1.as_deref(), Some(expected_hex.as_str()));
 }

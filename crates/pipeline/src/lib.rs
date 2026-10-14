@@ -9,6 +9,48 @@
 
 use aperture_cas::{Address, Store};
 use aperture_probe::AssetMeta;
+use sha1::{Digest as _, Sha1};
+
+/// A reader that hashes SHA-1 while the bytes flow through it, so ingest
+/// computes both content keys in one pass: BLAKE3 inside the CAS (identity),
+/// SHA-1 in the tee (the compat alias Immich clients compare).
+struct Sha1Tee<R> {
+    inner: R,
+    hasher: Sha1,
+}
+
+impl<R: std::io::Read> std::io::Read for Sha1Tee<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if let Some(read) = buf.get(..n) {
+            self.hasher.update(read);
+        }
+        Ok(n)
+    }
+}
+
+impl<R> Sha1Tee<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha1::new(),
+        }
+    }
+
+    fn finish_hex(self) -> String {
+        hex_encode(&self.hasher.finalize())
+    }
+}
+
+/// Lowercase hex, the form the index stores and bulk-upload-check compares.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0xF), 16).unwrap_or('0'));
+    }
+    out
+}
 
 /// What one ingest produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +89,9 @@ impl Pipeline {
         reader: impl std::io::Read,
         file_name: Option<&str>,
     ) -> Result<IngestReport, PipelineError> {
-        let ingested = store.put_stream(reader).map_err(PipelineError::Cas)?;
+        let mut tee = Sha1Tee::new(reader);
+        let ingested = store.put_stream(&mut tee).map_err(PipelineError::Cas)?;
+        let sha1_hex = tee.finish_hex();
         if !ingested.newly_written {
             return Ok(IngestReport {
                 address: ingested.address,
@@ -85,6 +129,7 @@ impl Pipeline {
             duration_ms: meta.duration_ms,
             byte_len: ingested.len,
             file_name: file_name.map(str::to_string),
+            sha1: Some(sha1_hex),
         };
         index.record_asset(&record).map_err(PipelineError::Index)?;
         Ok(IngestReport {

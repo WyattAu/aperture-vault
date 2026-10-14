@@ -138,9 +138,11 @@ pub(crate) async fn upload_asset_multipart(
         filename.as_deref(),
     )
     .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    // The Immich shape: {id, status}. "duplicate" is not an error — the app
+    // treats it as confirmation the phone's copy is already safe here.
     json_created(&json!({
         "id": report.address.hex(),
-        "duplicate": !report.newly_written,
+        "status": if report.newly_written { "created" } else { "duplicate" },
     }))
 }
 
@@ -207,6 +209,220 @@ pub async fn thumbnail(
         .into_response())
 }
 
+/// `GET /api/server/ping` — the reachability check the Immich apps make
+/// before login. Unauthenticated by design: it answers for the server, not
+/// for a user.
+pub async fn ping() -> ApiResult {
+    json_ok(&json!({ "res": "pong" }))
+}
+
+/// `GET /api/server/features` — the flags the app adapts its UI around.
+/// Every flag is the truth: only password login exists here today.
+pub async fn features() -> ApiResult {
+    json_ok(&json!({
+        "configFile": false,
+        "duplicateDetection": true,
+        "email": false,
+        "facialRecognition": false,
+        "importFaces": false,
+        "map": false,
+        "oauth": false,
+        "oauthAutoLaunch": false,
+        "ocr": false,
+        "passwordLogin": true,
+        "realtimeTranscoding": false,
+        "reverseGeocoding": false,
+        "search": false,
+        "sidecar": false,
+        "smartSearch": false,
+        "trash": false,
+    }))
+}
+
+/// `GET /api/server/config` — the login-screen configuration. Initialized
+/// and onboarded: the vault has no admin-signup dance; the first user is
+/// created with the CLI.
+pub async fn server_config() -> ApiResult {
+    json_ok(&json!({
+        "externalDomain": "",
+        "isInitialized": true,
+        "isOnboarded": true,
+        "loginPageMessage": "",
+        "maintenanceMode": false,
+        "mapDarkStyleUrl": "",
+        "mapLightStyleUrl": "",
+        "minFaces": 1,
+        "oauthButtonText": "",
+        "publicUsers": false,
+        "trashDays": 0,
+        "userDeleteDelay": 0,
+    }))
+}
+
+/// `GET /api/server/version` — the vault's own semver, not a pretended
+/// Immich version. An id that lies about identity would be a defect, and a
+/// version that lies about the software is the same defect.
+pub async fn version() -> ApiResult {
+    json_ok(&json!({
+        "major": env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap_or(0),
+        "minor": env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap_or(0),
+        "patch": env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap_or(0),
+        "prerelease": serde_json::Value::Null,
+    }))
+}
+
+/// A client checksum: `base64::engine::general_purpose::STANDARD`-encoded or
+/// hex SHA-1, both accepted, both answered in hex.
+fn checksum_to_hex(input: &str) -> Option<String> {
+    use base64::Engine as _;
+    let trimmed = input.trim();
+    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(trimmed.to_ascii_lowercase());
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .ok()?;
+    (decoded.len() == 20).then(|| {
+        decoded
+            .iter()
+            .fold(String::with_capacity(40), |mut out, b| {
+                let _ = write_hex_byte(&mut out, *b);
+                out
+            })
+    })
+}
+
+fn write_hex_byte(out: &mut String, byte: u8) -> Result<(), std::fmt::Error> {
+    use std::fmt::Write as _;
+    write!(out, "{byte:02x}")
+}
+
+/// `POST /api/assets/bulk-upload-check` — the call that makes Immich backup
+/// resumable: the phone sends the SHA-1 of every local file and learns
+/// which ones the vault already holds. Accepted checksums mean "upload";
+/// rejected ones with reason `duplicate` mean "already safe here".
+pub async fn bulk_upload_check(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    #[derive(serde::Deserialize)]
+    struct Item {
+        checksum: String,
+        id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Request {
+        assets: Vec<Item>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let results: Vec<serde_json::Value> = req
+        .assets
+        .iter()
+        .map(|item| {
+            let hex = checksum_to_hex(&item.checksum);
+            let known = hex
+                .as_deref()
+                .and_then(|hex| index.asset_by_sha1(hex).ok())
+                .flatten();
+            match known {
+                Some(asset_id) => json!({
+                    "action": "reject",
+                    "id": item.id,
+                    "assetId": asset_id,
+                    "isTrashed": false,
+                    "reason": "duplicate",
+                }),
+                None => json!({ "action": "accept", "id": item.id }),
+            }
+        })
+        .collect();
+    json_ok(&json!({ "results": results }))
+}
+
+/// `GET /api/timeline/buckets` — the gallery's strip of capture days,
+/// newest first, in Immich's `{timeBucket, count}` shape.
+pub async fn timeline_buckets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let buckets = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .buckets()
+        .map_err(|_| ApiError::Internal)?;
+    let items: Vec<serde_json::Value> = buckets
+        .into_iter()
+        .map(|(day, count)| json!({ "timeBucket": day, "count": count }))
+        .collect();
+    json_ok(&serde_json::Value::Array(items))
+}
+
+/// The columnar per-asset arrays `GET /api/timeline/bucket` returns: position
+/// `i` in every array is asset `i`, Immich's bandwidth optimization.
+fn columnar(assets: &[aperture_index::AssetRecord], owner: &str) -> serde_json::Value {
+    let c = |v: Vec<serde_json::Value>| v;
+    let n = assets.len();
+    json!({
+        "id": c(assets.iter().map(|a| json!(a.address)).collect()),
+        "createdAt": c(assets.iter().map(|a| json!(a.taken_at.clone().unwrap_or_else(|| "1970-01-01T00:00:00".into()))).collect()),
+        "fileCreatedAt": c(assets.iter().map(|a| json!(a.taken_at.clone().unwrap_or_else(|| "1970-01-01T00:00:00".into()))).collect()),
+        "duration": c(assets.iter().map(|a| json!(a.duration_ms.unwrap_or(0) / 1000)).collect()),
+        "isImage": c(assets.iter().map(|a| json!(a.duration_ms.is_none())).collect()),
+        "isFavorite": c(vec![serde_json::Value::Bool(false); n]),
+        "isTrashed": c(vec![serde_json::Value::Bool(false); n]),
+        "livePhotoVideoId": c(vec![json!(""); n]),
+        "localOffsetHours": c(vec![json!(0); n]),
+        "ownerId": c(vec![json!(owner); n]),
+        "projectionType": c(vec![json!(""); n]),
+        "ratio": c(assets.iter().map(|a| json!(match (a.width, a.height) {
+            (Some(w), Some(h)) if h > 0 => serde_json::json!(f64::from(w) / f64::from(h)),
+            _ => serde_json::json!(1.0),
+        })).collect()),
+        "thumbhash": c(vec![json!(""); n]),
+        "visibility": c(vec![json!("timeline"); n]),
+        "latitude": c(assets.iter().map(|a| json!(a.latitude)).collect()),
+        "longitude": c(assets.iter().map(|a| json!(a.longitude)).collect()),
+        "city": c(vec![json!(""); n]),
+        "country": c(vec![json!(""); n]),
+        "stack": c(vec![serde_json::Value::Array(vec![]); n]),
+    })
+}
+
+/// `GET /api/timeline/bucket?timeBucket=YYYY-MM-DD...` — one capture day's
+/// assets, columnar. The `timeBucket` may carry a time suffix; the day rule
+/// is the index's own: EXIF date when present, the 1970 sentinel otherwise.
+pub async fn timeline_bucket(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let user_id = require_user(&state, &headers)?;
+    let Some(bucket) = params.get("timeBucket") else {
+        return Err(ApiError::BadRequest(
+            "timeBucket is required: the day to fetch".into(),
+        ));
+    };
+    if bucket.len() < 10 {
+        return Err(ApiError::BadRequest(
+            "timeBucket must name a day (YYYY-MM-DD...)".into(),
+        ));
+    }
+    let day = &bucket[..10];
+    let assets = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .assets_in_day(day)
+        .map_err(|_| ApiError::Internal)?;
+    json_ok(&columnar(&assets, &user_id))
+}
+
 /// The Immich-compatible routes, mounted under `/api`. `POST /api/assets` is
 /// intentionally absent: the dispatcher in `build_router` serves both client
 /// encodings at that URL and hands multipart bodies to this module.
@@ -218,5 +434,12 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/users/me", get(users_me))
         .route("/api/assets/{id}/original", get(original))
         .route("/api/assets/{id}/thumbnail", get(thumbnail))
+        .route("/api/server/ping", get(ping))
+        .route("/api/server/features", get(features))
+        .route("/api/server/config", get(server_config))
+        .route("/api/server/version", get(version))
+        .route("/api/assets/bulk-upload-check", post(bulk_upload_check))
+        .route("/api/timeline/buckets", get(timeline_buckets))
+        .route("/api/timeline/bucket", get(timeline_bucket))
         .with_state(state)
 }

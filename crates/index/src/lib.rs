@@ -49,6 +49,10 @@ pub struct AssetRecord {
     pub byte_len: u64,
     /// The original file name, for display.
     pub file_name: Option<String>,
+    /// SHA-1 hex, computed while streaming — the compat alias Immich
+    /// clients compare. Not an identity: [`Index::asset_by_sha1`] exists so
+    /// clients' checksums resolve, while the CAS's truth stays BLAKE3.
+    pub sha1: Option<String>,
 }
 
 /// One timeline entry: the address, its capture day, and display time.
@@ -86,6 +90,8 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)?;
+        apply_migrations(&conn)?;
+        conn.execute_batch(POST_MIGRATION_SCHEMA)?;
         Ok(Self { conn })
     }
 
@@ -97,6 +103,8 @@ impl Index {
     pub fn in_memory() -> Result<Self, IndexError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        apply_migrations(&conn)?;
+        conn.execute_batch(POST_MIGRATION_SCHEMA)?;
         Ok(Self { conn })
     }
 
@@ -110,8 +118,8 @@ impl Index {
         let changed = self.conn.execute(
             "INSERT INTO assets
                (address, width, height, taken_at, make, model,
-                latitude, longitude, duration_ms, byte_len, file_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                latitude, longitude, duration_ms, byte_len, file_name, sha1)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(address) DO NOTHING",
             rusqlite::params![
                 r.address,
@@ -125,6 +133,7 @@ impl Index {
                 r.duration_ms,
                 r.byte_len,
                 r.file_name,
+                r.sha1,
             ],
         )?;
         Ok(if changed == 0 {
@@ -172,7 +181,7 @@ impl Index {
     pub fn asset(&self, address: &str) -> Result<Option<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1
              FROM assets WHERE address = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address], |row| {
@@ -188,12 +197,89 @@ impl Index {
                 duration_ms: row.get(8)?,
                 byte_len: row.get(9)?,
                 file_name: row.get(10)?,
+                sha1: row.get(11)?,
             })
         })?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
+    }
+
+    /// The address whose SHA-1 is `hex`, or `None`. SHA-1 is the *compat
+    /// alias* Immich clients speak, never the identity: the CAS stays
+    /// BLAKE3-only, and this lookup only ever answers "which asset did a
+    /// client's checksum name".
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn asset_by_sha1(&self, hex: &str) -> Result<Option<String>, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT address FROM assets WHERE sha1 = ?1",
+                rusqlite::params![hex],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other.into()),
+            })
+    }
+
+    /// Capture-day buckets, newest first: `(day, count)`. The same day rule
+    /// the timeline uses — EXIF `taken_at` when present, the 1970 sentinel
+    /// grouping untagged assets by ingest order.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn buckets(&self) -> Result<Vec<(String, u64)>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(substr(taken_at, 1, 10), '1970-01-01') AS day,
+                    count(*) AS n
+             FROM assets
+             GROUP BY day
+             ORDER BY day DESC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// Every asset captured on `day` (`YYYY-MM-DD`, or the 1970 sentinel for
+    /// untagged), ordered by capture time.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn assets_in_day(&self, day: &str) -> Result<Vec<AssetRecord>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, width, height, taken_at, make, model,
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1
+             FROM assets
+             WHERE COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
+             ORDER BY substr(taken_at, 12, 8) DESC, address ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![day], |row| {
+            Ok(AssetRecord {
+                address: row.get(0)?,
+                width: row.get(1)?,
+                height: row.get(2)?,
+                taken_at: row.get(3)?,
+                make: row.get(4)?,
+                model: row.get(5)?,
+                latitude: row.get(6)?,
+                longitude: row.get(7)?,
+                duration_ms: row.get(8)?,
+                byte_len: row.get(9)?,
+                file_name: row.get(10)?,
+                sha1: row.get(11)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
     }
 
     /// Record a derived asset — the mapping from (source asset, spec) to the
@@ -248,6 +334,28 @@ impl Index {
     }
 }
 
+/// Additive, idempotent migrations for databases opened by older versions.
+/// Each entry runs until it either succeeds or fails with "already exists";
+/// the index is documented as a rebuildable cache, so migrations never
+/// rewrite data — they only widen it.
+fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
+    let migrations: &[&str] = &["ALTER TABLE assets ADD COLUMN sha1 TEXT"];
+    for sql in migrations {
+        let result = conn.execute_batch(sql);
+        if let Err(rusqlite::Error::SqliteFailure(_, msg)) = &result {
+            // SQLITE_ERROR(1) with this message is the "already applied" case.
+            if msg
+                .as_deref()
+                .is_some_and(|m| m.contains("duplicate column name"))
+            {
+                continue;
+            }
+        }
+        result.map_err(IndexError::from)?;
+    }
+    Ok(())
+}
+
 /// The schema, applied idempotently on open.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS assets (
@@ -261,7 +369,8 @@ CREATE TABLE IF NOT EXISTS assets (
     longitude  REAL,
     duration_ms INTEGER,
     byte_len   INTEGER NOT NULL,
-    file_name  TEXT
+    file_name  TEXT,
+    sha1       TEXT
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 
@@ -275,6 +384,13 @@ CREATE TABLE IF NOT EXISTS derived (
     address TEXT NOT NULL,
     PRIMARY KEY (source, spec)
 );
+";
+
+/// Indexes that reference columns added by migrations; applied after
+/// `apply_migrations`, because an index on a not-yet-added column would
+/// fail on databases opened by older versions.
+const POST_MIGRATION_SCHEMA: &str = "
+CREATE INDEX IF NOT EXISTS assets_sha1 ON assets(sha1);
 ";
 
 /// Errors from the index.
