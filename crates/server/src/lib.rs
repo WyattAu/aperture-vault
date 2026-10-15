@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub mod immich;
+pub mod zip;
 
 /// The shared application state, cheap to clone.
 #[derive(Clone)]

@@ -13,6 +13,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Datelike as _;
+use std::io::Read as _;
 use tower::ServiceExt as _;
 
 fn app_with_user(email: &str) -> (tempfile::TempDir, axum::Router, String) {
@@ -1135,4 +1136,82 @@ async fn map_markers_serve_coordinates_and_refuse_unsupported_updates() {
     // The feature flag now says the map exists.
     let (_, features) = send(&mut router, "GET", "/api/server/features", None, None).await;
     assert_eq!(features["map"], serde_json::Value::Bool(true));
+}
+
+#[tokio::test]
+async fn download_archive_delivers_a_real_zip_of_originals() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let first = upload_bytes(&mut router, &token, "first-shot.png", &real_png(80, 80)).await;
+    let second = upload_bytes(&mut router, &token, "second-shot.png", &real_png(60, 60)).await;
+
+    let body = serde_json::json!({
+        "assetIds": [first, second],
+        "archiveName": "my-pictures",
+    })
+    .to_string();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/download/archive")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(body))
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("Content-Disposition")
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"my-pictures.zip\"")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+
+    // A real unzipper reads it, and both originals are inside under their
+    // display names with byte-exact content.
+    let mut reader = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("the archive opens");
+    assert_eq!(reader.len(), 2);
+    let mut got = Vec::new();
+    reader
+        .by_name("first-shot.png")
+        .expect("entry")
+        .read_to_end(&mut got)
+        .expect("reads");
+    assert_eq!(got, real_png(80, 80), "byte-exact original");
+
+    // Duplicate display names do not overwrite each other.
+    let twin = upload_bytes(&mut router, &token, "first-shot.png", &real_png(70, 70)).await;
+    let body = serde_json::json!({ "assetIds": [first, twin] }).to_string();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/download/archive")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(body))
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+    let mut reader = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("opens");
+    assert_eq!(reader.len(), 2, "both members survive the name collision");
+    assert!(reader.by_name("first-shot.png").is_ok());
+    assert!(reader.by_name("first-shot (1).png").is_ok());
+
+    // An empty selection is refused.
+    let (status, _) = send(
+        &mut router,
+        "POST",
+        "/api/download/archive",
+        Some(&token),
+        Some(
+            serde_json::json!({ "assetIds": [] })
+                .to_string()
+                .into_bytes(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

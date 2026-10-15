@@ -1204,6 +1204,97 @@ pub async fn map_markers(
     json_ok(&serde_json::Value::Array(items))
 }
 
+/// `POST /api/download/archive` — the selected originals as one ZIP.
+/// Session or share key (the key reaches exactly its album's members, as
+/// everywhere). The archive is STORE-method — photos are already
+/// compressed, and deflate on JPEG bytes spends CPU to save nothing — and
+/// capped: a selection larger than the budget is refused rather than
+/// buffered into oblivion.
+pub async fn download_archive(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: String,
+) -> ApiResult {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        #[serde(rename = "assetIds")]
+        asset_ids: Vec<String>,
+        #[serde(rename = "archiveName")]
+        archive_name: Option<String>,
+    }
+    let req: Request =
+        serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
+    if req.asset_ids.is_empty() {
+        return Err(ApiError::BadRequest("assetIds is empty".into()));
+    }
+    for asset_id in &req.asset_ids {
+        authorize_asset(
+            &state,
+            &headers,
+            asset_id,
+            params.get("key").map(String::as_str),
+        )?;
+    }
+    const MAX_ARCHIVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let mut zip = crate::zip::ZipArchive::new();
+    let mut names_used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for asset_id in &req.asset_ids {
+        let addr = crate::cas_address(asset_id)?;
+        let Some(record) = index.asset(&addr.hex()).map_err(|_| ApiError::Internal)? else {
+            continue;
+        };
+        let bytes = state.store.get_bytes(&addr).map_err(|e| match e {
+            aperture_cas::CasError::Missing { .. } => ApiError::NotFound,
+            _other => ApiError::Internal,
+        })?;
+        if zip.len() + bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(ApiError::BadRequest(
+                "the selection exceeds the archive budget; download in parts".into(),
+            ));
+        }
+        let mut name = record.file_name.clone().unwrap_or_else(|| {
+            let ext = if record.duration_ms.is_some() {
+                "mp4"
+            } else {
+                "jpg"
+            };
+            format!("{asset_id}.{ext}")
+        });
+        // ZIP names must be unique; two assets photographed with the same
+        // file name would silently overwrite each other.
+        let mut unique = name.clone();
+        let mut suffix = 1u32;
+        while !names_used.insert(unique.clone()) {
+            let stem = name
+                .rsplit_once('.')
+                .map_or_else(|| name.clone(), |(stem, _)| stem.to_string());
+            let ext = name
+                .rsplit_once('.')
+                .map_or_else(String::new, |(_, ext)| format!(".{ext}"));
+            unique = format!("{stem} ({suffix}){ext}");
+            suffix += 1;
+        }
+        name = unique;
+        zip.add(&name, &bytes);
+    }
+    drop(index);
+    let archive = zip.finish();
+    let archive_name = req
+        .archive_name
+        .unwrap_or_else(|| "aperture-download".into());
+    let disposition =
+        axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{archive_name}.zip\""))
+            .map_err(|_| ApiError::Internal)?;
+    let response = axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_DISPOSITION, disposition);
+    response
+        .body(axum::body::Body::from(archive))
+        .map_err(|_| ApiError::Internal)
+}
+
 /// `DELETE /api/assets` — trash the named assets. With `force: true` the
 /// deletion is permanent in one step: the index rows and their memberships
 /// go, and the CAS blobs become unreferenced garbage for the horizon
@@ -1432,6 +1523,7 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/search/metadata", post(search_metadata))
         .route("/api/memories", get(memories))
         .route("/api/map/markers", get(map_markers))
+        .route("/api/download/archive", post(download_archive))
         .route("/api/trash", get(trash_view))
         .route("/api/trash/empty", post(trash_empty))
         .route("/api/trash/restore", post(trash_restore_all))

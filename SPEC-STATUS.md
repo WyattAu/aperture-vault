@@ -189,6 +189,16 @@
   error text, never silently ignored: an update that pretends to succeed
   while dropping a field is a lie.
 
+- **Download archive** — `POST /api/download/archive` returns the selected
+  originals as one ZIP, verified in tests by a real unzipper (the `zip`
+  crate reading the vault's own bytes back). The writer is STORE-method
+  and ~150 lines: photos are already compressed, and deflate on JPEG
+  bytes spends CPU to save nothing. The archive buffers in memory behind
+  a 2 GiB budget — a bigger selection is refused with "download in
+  parts", which is the honest response. Duplicate display names get
+  `name (1).ext` suffixes instead of silently overwriting; share keys
+  reach exactly their album's members, as everywhere.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
