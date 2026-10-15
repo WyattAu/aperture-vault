@@ -167,6 +167,17 @@
   verifier material, memories honestly empty without EXIF. Every read and
   every state change exercised over real HTTP against the shipped binary.
 
+- **Folder scan** (`aperture-pipeline::scan` + `aperture-server scan
+  <root> <dir>`) — point the vault at a photo directory and the dedup
+  machinery decides what is new. The skip check is the SHA-1 column in a
+  new role: clients asked "did you get this already?" and now the scanner
+  asks itself before writing. Two streaming passes (hash, then ingest
+  only if unknown) beat buffering a video; hidden files are ignored;
+  subdirectories are walked; one bad file lands in the failure list
+  instead of sinking the run. Dogfooded: scan 1 ingests 3, scan 2 skips
+  3, the server sees them — re-pointing at the same folder is a no-op,
+  which is the whole point of content addressing.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

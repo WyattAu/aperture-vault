@@ -33,6 +33,23 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The store, for CLI paths (scan) that drive storage directly.
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The index, locked — CLI paths are single-threaded and hold it for
+    /// the whole operation.
+    ///
+    /// # Errors
+    ///
+    /// A string when the mutex is poisoned: the process cannot continue.
+    pub fn lock_index(&self) -> Result<std::sync::MutexGuard<'_, aperture_index::Index>, String> {
+        self.index
+            .lock()
+            .map_err(|_| "index mutex poisoned".to_string())
+    }
     /// Assemble the state from the vault's parts. The token signing secret
     /// is generated per-install and persisted beside the index: restarting
     /// the server must not invalidate outstanding sessions.

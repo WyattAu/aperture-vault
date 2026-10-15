@@ -159,4 +159,5 @@ pub enum PipelineError {
     NotAnImage,
 }
 
+pub mod scan;
 pub mod thumb;

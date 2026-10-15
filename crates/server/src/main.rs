@@ -19,6 +19,30 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let first = args.next().unwrap_or_else(|| "serve".into());
+    if first == "scan" {
+        let (root, dir): (PathBuf, PathBuf) = match (args.next(), args.next()) {
+            (Some(root), Some(dir)) => (root.into(), dir.into()),
+            _ => {
+                eprintln!("usage: aperture-server scan <vault-root> <directory>");
+                std::process::exit(2);
+            }
+        };
+        let state = aperture_server::AppState::new(&root)?;
+        let index = state.lock_index()?;
+        let report = aperture_pipeline::scan::scan_directory(state.store(), &index, &dir)
+            .map_err(|e| format!("scan: {e}"))?;
+        eprintln!(
+            "scanned {} files: {} ingested, {} already present, {} failed",
+            report.scanned,
+            report.ingested,
+            report.skipped,
+            report.failed.len()
+        );
+        for (path, reason) in &report.failed {
+            eprintln!("  failed: {}: {reason}", path.display());
+        }
+        return Ok(());
+    }
     if first == "add-user" {
         let (root, email, password): (PathBuf, String, String) =
             match (args.next(), args.next(), args.next()) {
