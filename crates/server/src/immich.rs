@@ -414,14 +414,42 @@ pub async fn bulk_upload_check(
 pub async fn timeline_buckets(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult {
     require_user(&state, &headers)?;
-    let buckets = state
-        .index
-        .lock()
-        .map_err(|_| ApiError::Internal)?
-        .buckets()
-        .map_err(|_| ApiError::Internal)?;
+    let buckets = {
+        let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+        if let Some(album_id) = params.get("albumId") {
+            // The album's own capture-day strip: members grouped by the
+            // same day rule, counted here. Album asset lists are small;
+            // the grouping is arithmetic, not a query.
+            if index
+                .album(album_id)
+                .map_err(|_| ApiError::Internal)?
+                .is_none()
+            {
+                return Err(ApiError::NotFound);
+            }
+            let mut counts: std::collections::BTreeMap<String, u64> =
+                std::collections::BTreeMap::new();
+            for record in index
+                .album_assets(album_id)
+                .map_err(|_| ApiError::Internal)?
+            {
+                let day = record
+                    .taken_at
+                    .as_deref()
+                    .map(|t| t.get(..10).unwrap_or("1970-01-01").to_string())
+                    .unwrap_or_else(|| "1970-01-01".into());
+                *counts.entry(day).or_insert(0) += 1;
+            }
+            let mut items: Vec<(String, u64)> = counts.into_iter().collect();
+            items.sort_by(|a, b| b.0.cmp(&a.0));
+            items
+        } else {
+            index.buckets().map_err(|_| ApiError::Internal)?
+        }
+    };
     let items: Vec<serde_json::Value> = buckets
         .into_iter()
         .map(|(day, count)| json!({ "timeBucket": day, "count": count }))
@@ -483,12 +511,28 @@ pub async fn timeline_bucket(
         ));
     }
     let day = &bucket[..10];
-    let assets = state
-        .index
-        .lock()
-        .map_err(|_| ApiError::Internal)?
-        .assets_in_day(day)
-        .map_err(|_| ApiError::Internal)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let mut assets = index.assets_in_day(day).map_err(|_| ApiError::Internal)?;
+    // An albumId narrows the day to the album's members — the call the
+    // app's album screen makes. Non-members are filtered, not errors: an
+    // album day with no captures is an empty bucket, not a miss.
+    if let Some(album_id) = params.get("albumId") {
+        if index
+            .album(album_id)
+            .map_err(|_| ApiError::Internal)?
+            .is_none()
+        {
+            return Err(ApiError::NotFound);
+        }
+        let members: std::collections::HashSet<String> = index
+            .album_assets(album_id)
+            .map_err(|_| ApiError::Internal)?
+            .into_iter()
+            .map(|record| record.address)
+            .collect();
+        assets.retain(|record| members.contains(&record.address));
+    }
+    drop(index);
     json_ok(&columnar(&assets, &user_id))
 }
 
@@ -872,6 +916,27 @@ pub async fn shared_album(
         "album": album_json(&album),
     });
     json_ok(&dto)
+}
+
+/// `GET /api/users` — the directory the album-share dialog reads. No
+/// verifiers, no emails beyond the login name itself.
+pub async fn users(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    require_user(&state, &headers)?;
+    let all = state.users.lock().map_err(|_| ApiError::Internal)?.users();
+    let items = all
+        .iter()
+        .map(|user| {
+            json!({
+                "id": user.id,
+                "email": user.username,
+                "name": user.display_name,
+                "profileImagePath": "",
+                "profileChangedAt": "",
+                "avatarColor": "primary",
+            })
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(items))
 }
 
 /// `GET /api/memories` — "on this day": assets captured on today's month
@@ -1279,6 +1344,7 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/auth/login", post(login))
         .route("/api/auth/validateToken", post(validate_token))
         .route("/api/users/me", get(users_me))
+        .route("/api/users", get(users))
         .route("/api/assets/{id}/original", get(original))
         .route("/api/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/server/ping", get(ping))

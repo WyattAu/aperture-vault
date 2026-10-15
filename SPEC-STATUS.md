@@ -151,6 +151,13 @@
   forgets: rows, memberships, and derived mappings go; the CAS blobs
   become unreferenced garbage for the horizon sweeper.
 
+- **Album-scoped timeline + user directory** — the two calls the app's
+  album screen and share dialog make: `GET /api/timeline/buckets?albumId=`
+  and `.../bucket?albumId=` now narrow to album members (unknown album is
+  a 404; an empty day is an empty bucket), and `GET /api/users` serves the
+  directory without verifiers — password hashes never leave the store,
+  asserted in the test by searching the wire format for the PHC prefix.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

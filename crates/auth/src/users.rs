@@ -125,6 +125,24 @@ impl UserStore {
         })
     }
 
+    /// Every user, alphabetical by login name — the list the album-share
+    /// dialog displays. Verifiers never leave; passwords are not invited.
+    #[must_use]
+    pub fn users(&self) -> Vec<User> {
+        let mut all: Vec<User> = self
+            .users
+            .values()
+            .map(|stored| User {
+                id: stored.id.clone(),
+                username: stored.username.clone(),
+                display_name: stored.display_name.clone(),
+                password_hash: stored.password_hash.clone(),
+            })
+            .collect();
+        all.sort_by(|a, b| a.username.cmp(&b.username));
+        all
+    }
+
     fn persist(&self) -> Result<(), AuthError> {
         let text = serde_json::to_string_pretty(&self.users)
             .map_err(|e| AuthError::Store(format!("serialize: {e}")))?;

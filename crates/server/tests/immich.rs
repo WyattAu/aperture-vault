@@ -997,3 +997,70 @@ async fn trash_hides_then_restores_then_destroys() {
     let (_, trash) = send(&mut router, "GET", "/api/trash", Some(&token), None).await;
     assert_eq!(trash["count"], 0);
 }
+
+#[tokio::test]
+async fn album_scoped_timeline_serves_the_album_screen() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let inside = upload_bytes(&mut router, &token, "in-album.png", &real_png(120, 80)).await;
+    let outside = upload_bytes(&mut router, &token, "not-in.png", &real_png(80, 120)).await;
+
+    let body = serde_json::json!({ "albumName": "Scoped", "assetIds": [inside] }).to_string();
+    let (_, album) = send(
+        &mut router,
+        "POST",
+        "/api/albums",
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    let album_id = album["id"].as_str().expect("id").to_string();
+
+    // The album's own bucket strip: one bucket, one asset.
+    let uri = format!("/api/timeline/buckets?albumId={album_id}");
+    let (status, buckets) = send(&mut router, "GET", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let list = buckets.as_array().expect("array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["count"], 1);
+    let day = list[0]["timeBucket"].as_str().expect("day").to_string();
+
+    // The bucket fetch narrowed by albumId: the member in, the outsider out.
+    let uri = format!("/api/timeline/bucket?albumId={album_id}&timeBucket={day}T00:00:00.000Z");
+    let (status, bucket) = send(&mut router, "GET", &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids = bucket["id"].as_array().expect("ids");
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].as_str(), Some(inside.as_str()));
+    let rendered = serde_json::to_string(&bucket).expect("serializes");
+    assert!(
+        !rendered.contains(&outside),
+        "the outsider is not in the album's bucket"
+    );
+
+    // An unknown album is a 404, not an empty bucket.
+    let (status, _) = send(
+        &mut router,
+        "GET",
+        "/api/timeline/buckets?albumId=nope",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn users_listing_shows_the_directory_without_secrets() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let (status, list) = send(&mut router, "GET", "/api/users", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = list.as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["email"], "wyatt@example.com");
+    assert_eq!(items[0]["name"], "wyatt@example.com");
+    let raw = serde_json::to_string(&list).expect("serializes");
+    assert!(
+        !raw.contains("argon2"),
+        "password verifiers never leave the store"
+    );
+}
