@@ -158,6 +158,15 @@
   directory without verifiers — password hashes never leave the store,
   asserted in the test by searching the wire format for the PHC prefix.
 
+- **Comprehensive E2E (release binary, curl as the client)** — the whole
+  surface in one session: three distinct uploads (plus an accidental
+  re-demonstration of dedup: three identical ffmpeg frames collapsed to
+  one asset), favorite, album buckets + album-scoped day fetch, search by
+  name and favorite, trash → statistics drop → restore → counts return,
+  share public access and 401-after-revoke, users directory with no
+  verifier material, memories honestly empty without EXIF. Every read and
+  every state change exercised over real HTTP against the shipped binary.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
