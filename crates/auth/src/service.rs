@@ -6,8 +6,10 @@
 //! authenticate as a user, and a session must never be accepted as album
 //! access.
 
+use crate::sessions::SessionStore;
 use crate::{AuthError, User};
 use salting::Pepper;
+use std::sync::Mutex;
 use tokenkit::claims::StandardClaims;
 use tokenkit::service::{JwtAlgorithm, JwtConfig, JwtService};
 
@@ -28,10 +30,15 @@ pub const ISSUER: &str = "aperture-vault";
 pub const AUDIENCES: [&str; 2] = ["aperture-vault", "share"];
 
 /// Session and share-link token issuance and validation.
+///
+/// Sessions are revocable: every issued session carries a `jti` recorded in
+/// the [`SessionStore`], and validation requires the row to still be live.
+/// The JWT proves authenticity; the registry decides liveness.
 pub struct Auth {
     service: JwtService,
     session_ttl: i64,
     share_ttl: i64,
+    sessions: Mutex<SessionStore>,
 }
 
 impl Auth {
@@ -46,6 +53,7 @@ impl Auth {
         secret: &str,
         session_ttl_secs: i64,
         share_ttl_secs: i64,
+        sessions: SessionStore,
     ) -> Result<Self, AuthError> {
         let config = JwtConfig {
             algorithm: JwtAlgorithm::HS256,
@@ -69,6 +77,7 @@ impl Auth {
             service: tokenkit::service::JwtService::new(config),
             session_ttl: session_ttl_secs,
             share_ttl: share_ttl_secs,
+            sessions: Mutex::new(sessions),
         })
     }
 
@@ -78,7 +87,19 @@ impl Auth {
     ///
     /// [`AuthError::Token`] on encoding failure.
     pub fn issue_session(&self, user: &User) -> Result<String, AuthError> {
-        self.issue(&user.id, role::USER, "aperture-vault", self.session_ttl)
+        let jti = crate::service::new_id()?;
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(self.session_ttl);
+        self.sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?
+            .create(&jti, &user.username, expires_at.timestamp())?;
+        self.issue_with_jti(
+            &user.id,
+            role::USER,
+            "aperture-vault",
+            self.session_ttl,
+            jti,
+        )
     }
 
     /// Issue a share-link token for an album.
@@ -123,7 +144,135 @@ impl Auth {
         if claims.role.as_deref() != Some(role::USER) {
             return Err(AuthError::InvalidSession);
         }
+        let jti = claims.jti.ok_or(AuthError::InvalidSession)?;
+        let live = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?
+            .active(&jti);
+        if !live {
+            return Err(AuthError::InvalidSession);
+        }
         claims.sub.ok_or(AuthError::InvalidSession)
+    }
+
+    /// The `jti` of a live session token — which row in the registry is
+    /// "me". Every other session in the list is *not* the caller's.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidSession`] when the token is not a live session.
+    pub fn session_jti(&self, token: &str) -> Result<String, AuthError> {
+        let claims = self
+            .service
+            .validate(token)
+            .map_err(|_| AuthError::InvalidSession)?;
+        if claims.role.as_deref() != Some(role::USER) {
+            return Err(AuthError::InvalidSession);
+        }
+        let jti = claims.jti.ok_or(AuthError::InvalidSession)?;
+        if !self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?
+            .active(&jti)
+        {
+            return Err(AuthError::InvalidSession);
+        }
+        Ok(jti)
+    }
+
+    /// Revoke the session a token names. Returns whether it was live —
+    /// logging out twice is not an error, it is a no-op that succeeded.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidSession`] when the token is not a live session;
+    /// [`AuthError::Store`] on registry failure.
+    pub fn logout(&self, token: &str) -> Result<bool, AuthError> {
+        let claims = self
+            .service
+            .validate(token)
+            .map_err(|_| AuthError::InvalidSession)?;
+        if claims.role.as_deref() != Some(role::USER) {
+            return Err(AuthError::InvalidSession);
+        }
+        let jti = claims.jti.ok_or(AuthError::InvalidSession)?;
+        self.sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?
+            .revoke(&jti)
+    }
+
+    /// The live sessions of one user, oldest first:
+    /// `(jti, created_at, expires_at)` as local timestamps.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] on registry failure.
+    pub fn sessions_for(&self, username: &str) -> Result<Vec<(String, String, String)>, AuthError> {
+        let fmt = |unix: i64| {
+            chrono::DateTime::from_timestamp(unix, 0)
+                .map(|utc| utc.format("%Y-%m-%dT%H:%M:%S").to_string())
+                .unwrap_or_default()
+        };
+        self.sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?
+            .live_for(username)
+            .map(|live| {
+                live.into_iter()
+                    .map(|(jti, created, expires)| (jti, fmt(created), fmt(expires)))
+                    .collect()
+            })
+    }
+
+    /// Revoke one of a user's own sessions. Returns whether it was live.
+    /// A user can only ever revoke their own: the registry is queried by
+    /// the owner, never by id alone.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::Store`] on registry failure.
+    pub fn revoke_session(&self, username: &str, jti: &str) -> Result<bool, AuthError> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| AuthError::Store("session registry poisoned".into()))?;
+        let owned = sessions
+            .live_for(username)
+            .is_ok_and(|live| live.iter().any(|(owned_jti, _, _)| owned_jti == jti));
+        if owned {
+            sessions.revoke(jti)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Issue with an explicit `jti`, shared by `issue_session`.
+    fn issue_with_jti(
+        &self,
+        sub: &str,
+        role: &str,
+        aud: &str,
+        ttl_secs: i64,
+        jti: String,
+    ) -> Result<String, AuthError> {
+        let now = chrono::Utc::now();
+        let claims = StandardClaims {
+            sub: Some(sub.to_string()),
+            iss: Some(ISSUER.to_string()),
+            aud: Some(aud.to_string()),
+            exp: Some(now + chrono::Duration::seconds(ttl_secs)),
+            iat: Some(now),
+            jti: Some(jti),
+            role: Some(role.to_string()),
+            permissions: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        };
+        self.service
+            .encode(&claims)
+            .map_err(|e| AuthError::Token(e.to_string()))
     }
 
     /// Validate a share-link token, returning the album id.

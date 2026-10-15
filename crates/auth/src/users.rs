@@ -14,7 +14,22 @@ use std::path::{Path, PathBuf};
 pub struct UserStore {
     path: PathBuf,
     users: BTreeMap<String, StoredUser>,
+    /// Consecutive password failures per login name, and the instant a
+    /// lockout lifts. In-memory by design: it defends against an online
+    /// guessing run, and an attacker who can restart the server has
+    /// already won something worse than a password.
+    failures: std::sync::Mutex<BTreeMap<String, FailureState>>,
 }
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FailureState {
+    count: u32,
+    locked_until_unix: Option<i64>,
+}
+
+/// Five failures in a row buys the attacker a quarter hour of silence.
+const LOCKOUT_THRESHOLD: u32 = 5;
+const LOCKOUT_SECS: i64 = 15 * 60;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct StoredUser {
@@ -42,6 +57,7 @@ impl UserStore {
         Ok(Self {
             path: path.to_path_buf(),
             users,
+            failures: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -95,17 +111,42 @@ impl UserStore {
     /// [`AuthError::InvalidCredentials`] on a miss;
     /// [`AuthError::Store`] on verification failure.
     pub fn verify_login(&self, username: &str, password: &str) -> Result<User, AuthError> {
+        {
+            // The lockout gate. The error is the same one a wrong password
+            // gets — a lockout that named itself would be an account
+            // existence oracle. The timing differs (no hash burned), which
+            // is the deliberate, documented residual.
+            let failures = self
+                .failures
+                .lock()
+                .map_err(|_| AuthError::Store("poisoned".into()))?;
+            if let Some(state) = failures.get(username) {
+                if let Some(until) = state.locked_until_unix {
+                    if until > unix_now() {
+                        return Err(AuthError::InvalidCredentials);
+                    }
+                }
+            }
+        }
         let Some(stored) = self.users.get(username) else {
             // Burn a hash anyway: constant-ish work, so the timing of a miss
             // for an unknown user matches the timing of a wrong password.
             let _ = verify_password(password, "$argon2id$placeholder");
+            self.note_failure(username);
             return Err(AuthError::InvalidCredentials);
         };
         let ok = verify_password(password, &stored.password_hash)
             .map_err(|e| AuthError::Store(format!("verify: {e}")))?;
         if !ok {
+            self.note_failure(username);
             return Err(AuthError::InvalidCredentials);
         }
+        // A success clears the ledger: one good password forgives the
+        // typos before it.
+        self.failures
+            .lock()
+            .map_err(|_| AuthError::Store("poisoned".into()))?
+            .remove(username);
         Ok(User {
             id: stored.id.clone(),
             username: stored.username.clone(),
@@ -143,6 +184,26 @@ impl UserStore {
         all
     }
 
+    /// Record a failure and arm the lockout at the threshold. Failures
+    /// count consecutively: a success resets, a lockout resets the counter
+    /// to zero when it lifts (the next failure starts a fresh series).
+    fn note_failure(&self, username: &str) {
+        let now = unix_now();
+        let mut failures = match self.failures.lock() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let state = failures.entry(username.to_string()).or_default();
+        if state.locked_until_unix.is_some_and(|until| until > now) {
+            return; // already locked; the lockout clock is the punishment
+        }
+        state.count += 1;
+        if state.count >= LOCKOUT_THRESHOLD {
+            state.locked_until_unix = Some(now + LOCKOUT_SECS);
+            state.count = 0;
+        }
+    }
+
     fn persist(&self) -> Result<(), AuthError> {
         let text = serde_json::to_string_pretty(&self.users)
             .map_err(|e| AuthError::Store(format!("serialize: {e}")))?;
@@ -153,4 +214,11 @@ impl UserStore {
             .map_err(|e| AuthError::Store(format!("{}: {e}", self.path.display())))?;
         Ok(())
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

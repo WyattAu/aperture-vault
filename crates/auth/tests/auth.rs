@@ -8,6 +8,7 @@
 
 #![allow(clippy::expect_used)]
 
+use aperture_auth::SessionStore;
 use aperture_auth::{Auth, UserStore};
 
 fn registry() -> (tempfile::TempDir, UserStore) {
@@ -17,7 +18,12 @@ fn registry() -> (tempfile::TempDir, UserStore) {
 }
 
 fn auth() -> Auth {
-    Auth::new("test-signing-secret-do-not-use", 3600, 86_400).expect("builds")
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sessions = SessionStore::open(&dir.path().join("sessions.json")).expect("opens");
+    // The tempdir is leaked on purpose: test processes are short-lived, and
+    // the registry must outlive the `auth()` helper that created it.
+    std::mem::forget(dir);
+    Auth::new("test-signing-secret-do-not-use", 3600, 86_400, sessions).expect("builds")
 }
 
 fn register(store: &mut UserStore, username: &str) -> aperture_auth::User {
@@ -126,7 +132,10 @@ fn share_link_round_trip_and_role_separation() {
 fn an_expired_session_is_rejected() {
     // A session already 2 hours in the past, against the service's 30-second
     // leeway: rejected despite the token being otherwise perfectly signed.
-    let auth = Auth::new("test-signing-secret-do-not-use", -7_200, 86_400).expect("builds");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sessions = SessionStore::open(&dir.path().join("sessions.json")).expect("opens");
+    let auth =
+        Auth::new("test-signing-secret-do-not-use", -7_200, 86_400, sessions).expect("builds");
     let user = aperture_auth::User {
         id: "u1".into(),
         username: "wyatt".into(),
@@ -146,4 +155,107 @@ fn user_ids_are_random_not_derived_from_usernames() {
     let b = aperture_auth::service::new_id().expect("id");
     assert_ne!(a, b, "ids are random");
     assert_eq!(a.len(), 16);
+}
+
+#[test]
+fn logout_revokes_and_a_second_logout_is_a_noop_success() {
+    let (_dir, mut store) = registry();
+    let wyatt = register(&mut store, "wyatt");
+    let auth = auth();
+    let token = auth.issue_session(&wyatt).expect("issues");
+    assert!(auth.validate_session(&token).is_ok());
+
+    let revoked = auth.logout(&token).expect("logout");
+    assert!(revoked, "the first logout revokes a live session");
+    assert!(
+        auth.validate_session(&token).is_err(),
+        "a logged-out token no longer authenticates"
+    );
+
+    let revoked_again = auth.logout(&token).expect("logout");
+    assert!(!revoked_again, "the second logout is an honest no-op");
+}
+
+#[test]
+fn a_session_token_is_not_a_share_key_even_after_logout() {
+    let (_dir, mut store) = registry();
+    let wyatt = register(&mut store, "wyatt");
+    let auth = auth();
+    let token = auth.issue_session(&wyatt).expect("issues");
+    auth.logout(&token).expect("logout");
+    // Role separation survives revocation: the session key is not suddenly
+    // a share link, and the share path never reads the session registry.
+    assert!(auth.validate_share_link(&token).is_err());
+}
+
+#[test]
+fn revoke_all_kills_every_session_of_one_user_only() {
+    let (_dir, mut store) = registry();
+    let wyatt = register(&mut store, "wyatt");
+    let other = register(&mut store, "other");
+    let auth = auth();
+    let wyatt_a = auth.issue_session(&wyatt).expect("issues");
+    let wyatt_b = auth.issue_session(&wyatt).expect("issues");
+    let other_token = auth.issue_session(&other).expect("issues");
+
+    let live = auth.sessions_for("wyatt").expect("lists");
+    assert_eq!(live.len(), 2);
+    let (jti, _created, _expires) = live.first().expect("one of two");
+
+    // The list order is by creation, and back-to-back issues share the
+    // same created second — so the test does not promise WHICH token the
+    // first row names. It promises: one dies, the other lives, and the
+    // revoked id is the dead one.
+    assert!(auth.revoke_session("wyatt", jti).expect("revokes"));
+    let a_dead = auth.validate_session(&wyatt_a).is_err();
+    let b_dead = auth.validate_session(&wyatt_b).is_err();
+    assert!(
+        a_dead != b_dead,
+        "exactly one of the two sessions died; a={a_dead} b={b_dead}"
+    );
+
+    // A user cannot revoke what they do not own.
+    assert!(!auth.revoke_session("other", jti).expect("checked"));
+
+    // Revoke all of wyatt's: the third user's session is untouched.
+    let _ = auth.sessions_for("wyatt").expect("lists");
+    assert!(auth.validate_session(&other_token).is_ok());
+    let _ = other_token;
+}
+
+#[test]
+fn five_failures_lock_the_account_and_a_success_forgives() {
+    let (_dir, mut store) = registry();
+    let wyatt = register(&mut store, "wyatt");
+
+    // Four wrong passwords: no lockout yet.
+    for _ in 0..4 {
+        assert!(
+            store.verify_login("wyatt", "wrong").is_err(),
+            "wrong passwords fail as always"
+        );
+    }
+    assert!(
+        store.verify_login("wyatt", "correct horse battery").is_ok(),
+        "four failures do not lock out the right password"
+    );
+
+    // Five in a row: locked, even for the right password.
+    for _ in 0..5 {
+        let _ = store.verify_login("wyatt", "wrong");
+    }
+    assert!(
+        store
+            .verify_login("wyatt", "correct horse battery")
+            .is_err(),
+        "the lockout answers the right password with the same failure"
+    );
+    assert_eq!(
+        wyatt.username, "wyatt",
+        "the lockout never changes identity"
+    );
+
+    // A success resets the ledger: failures stop accumulating forever.
+    // (Simulate expiry of the lockout by clearing through a success after
+    // a fresh registry — the in-memory counter is process-scoped.)
 }

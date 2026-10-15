@@ -918,6 +918,86 @@ pub async fn shared_album(
     json_ok(&dto)
 }
 
+/// `POST /api/auth/logout` — revoke the calling session. The JWT proves
+/// authenticity; the registry decides liveness, so a logged-out token
+/// stops working immediately. A second logout is an honest no-op.
+pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    let successful = state.auth.logout(token).map_err(|_| ApiError::Internal)?;
+    json_ok(&json!({ "successful": successful, "redirectUri": "" }))
+}
+
+/// `GET /api/sessions` — the operator's live sessions, oldest first: what
+/// "log out everywhere" is about to end.
+pub async fn sessions(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    let user_id = require_user(&state, &headers)?;
+    let username = username_for(&state, &user_id);
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let current_jti = state.auth.session_jti(token).unwrap_or_default();
+    let live = state
+        .auth
+        .sessions_for(&username)
+        .map_err(|_| ApiError::Internal)?;
+    let items = live
+        .into_iter()
+        .map(|(id, created, expires)| {
+            json!({
+                "id": id,
+                "createdAt": created,
+                "updatedAt": created,
+                "expiresAt": expires,
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "deviceType": "Browser",
+                "deviceOS": "",
+                "current": id == current_jti,
+                "isPendingSyncReset": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(items))
+}
+
+/// The login name behind a user id — sessions are owned by login name in
+/// the registry, and the two are one user.
+fn username_for(state: &AppState, user_id: &str) -> String {
+    state
+        .users
+        .lock()
+        .ok()
+        .and_then(|users| users.user_by_id(user_id))
+        .map(|user| user.username)
+        .unwrap_or_else(|| user_id.to_string())
+}
+
+/// `DELETE /api/sessions/{id}` — revoke one of the operator's own
+/// sessions. Ownership is enforced by the registry query, never by the id
+/// alone.
+pub async fn delete_session(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let user_id = require_user(&state, &headers)?;
+    let username = username_for(&state, &user_id);
+    let revoked = state
+        .auth
+        .revoke_session(&username, &id)
+        .map_err(|_| ApiError::Internal)?;
+    if revoked {
+        json_ok(&json!({ "success": true }))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
 /// `GET /api/users` — the directory the album-share dialog reads. No
 /// verifiers, no emails beyond the login name itself.
 pub async fn users(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
@@ -1530,8 +1610,11 @@ pub fn immich_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/validateToken", post(validate_token))
+        .route("/api/auth/logout", post(logout))
         .route("/api/users/me", get(users_me))
         .route("/api/users", get(users))
+        .route("/api/sessions", get(sessions))
+        .route("/api/sessions/{id}", delete(delete_session))
         .route("/api/assets/{id}/original", get(original))
         .route("/api/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/server/ping", get(ping))

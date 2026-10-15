@@ -74,8 +74,10 @@ impl AppState {
                 s
             }
         };
-        let auth =
-            Auth::new(&secret, 86_400 * 30, 86_400 * 365).map_err(|e| format!("auth: {e}"))?;
+        let session_store = aperture_auth::SessionStore::open(&vault_root.join("sessions.json"))
+            .map_err(|e| format!("sessions: {e}"))?;
+        let auth = Auth::new(&secret, 86_400 * 30, 86_400 * 365, session_store)
+            .map_err(|e| format!("auth: {e}"))?;
         Ok(Self {
             store: Arc::new(store),
             index: Arc::new(std::sync::Mutex::new(index)),

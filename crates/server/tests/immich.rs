@@ -1250,3 +1250,88 @@ async fn server_media_types_and_statistics_state_the_truth() {
     );
     assert_eq!(stats["usageByUser"], serde_json::json!([]));
 }
+
+#[tokio::test]
+async fn logout_revokes_the_session_and_it_stops_working() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+
+    // The token works before logout.
+    let (status, _) = send(&mut router, "GET", "/api/users/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Logout reports success in Immich's shape.
+    let (status, result) = send(&mut router, "POST", "/api/auth/logout", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["successful"], true);
+
+    // The same token no longer authenticates.
+    let (status, _) = send(&mut router, "GET", "/api/users/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A second logout is a no-op that says so: 200 with successful false.
+    // The token proves authenticity forever; the registry alone decides
+    // liveness, and there is nothing left to revoke.
+    let (status, result) = send(&mut router, "POST", "/api/auth/logout", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["successful"], false);
+}
+
+#[tokio::test]
+async fn sessions_are_listed_and_revocable_one_by_one() {
+    let (_dir, mut router, token_a) = app_with_user("wyatt@example.com");
+    // A second live session for the same user: log in again.
+    let (status, login) = send(
+        &mut router,
+        "POST",
+        "/api/auth/login",
+        None,
+        Some(br#"{"email":"wyatt@example.com","password":"correct horse battery"}"#.to_vec()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _token_b = login["accessToken"].as_str().expect("token").to_string();
+
+    let (status, sessions) = send(&mut router, "GET", "/api/sessions", Some(&token_a), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = sessions.as_array().expect("array");
+    assert_eq!(items.len(), 2, "two live sessions");
+    assert_eq!(items[0]["deviceType"], "Browser");
+    // Exactly one row is marked current: the caller's own.
+    let current = items
+        .iter()
+        .filter(|session| session["current"] == true)
+        .count();
+    assert_eq!(current, 1, "one session is the caller's");
+
+    // Revoke the OTHER session by id; it stops working, the caller's own
+    // survives — revoking a device does not log the device out of the list.
+    let doomed = items
+        .iter()
+        .find(|session| session["current"] != true)
+        .and_then(|session| session["id"].as_str())
+        .expect("the non-current session's id")
+        .to_string();
+    let (status, _) = send(
+        &mut router,
+        "DELETE",
+        &format!("/api/sessions/{doomed}"),
+        Some(&token_a),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, sessions) = send(&mut router, "GET", "/api/sessions", Some(&token_a), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sessions.as_array().expect("array").len(), 1);
+
+    // Deleting what is not yours (or not live) is a 404.
+    let (status, _) = send(
+        &mut router,
+        "DELETE",
+        &format!("/api/sessions/{doomed}"),
+        Some(&token_a),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

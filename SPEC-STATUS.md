@@ -208,6 +208,20 @@
   deliberately absent: nothing reads it before login, and a config
   surface nobody consumes is one more thing to keep honest.
 
+- **Session revocation + brute-force lockout** — the security arc. Every
+  issued session now carries a `jti` recorded in a new `SessionStore`
+  (same atomic-write JSON pattern as the user registry): the JWT proves
+  authenticity, the registry decides liveness, so `POST /api/auth/logout`
+  revokes for real and a logged-out token stops working immediately (a
+  second logout is `successful: false`, the honest no-op). `GET
+  /api/sessions` lists the operator's live sessions with the caller's own
+  marked `current`; `DELETE /api/sessions/{id}` revokes one, ownership
+  enforced by the registry query — a user can only ever revoke their own.
+  Login failures lock the account after five consecutive misses for
+  fifteen minutes, answering with the same error a wrong password gets —
+  a lockout that named itself would be an account-existence oracle; the
+  timing difference (no hash burned) is the documented residual.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

@@ -28,9 +28,11 @@
 //!   theatre is not implemented, and this is a decision, not an omission.
 
 pub mod service;
+pub mod sessions;
 pub mod users;
 
 pub use service::{Auth, ISSUER};
+pub use sessions::SessionStore;
 pub use users::UserStore;
 
 /// The minimum accepted password length. Length is the property that
