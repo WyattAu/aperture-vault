@@ -123,6 +123,10 @@ pub struct AssetRecord {
     /// Whether the user starred the asset. A display flag the user owns —
     /// never derived, never defaulted to true.
     pub is_favorite: bool,
+    /// The caption the user wrote, empty when none. EXIF descriptions from
+    /// the camera are not imported: a caption is authorship, and the
+    /// camera's is a default nobody reads.
+    pub description: String,
 }
 
 /// One timeline entry: the address, its capture day, and display time.
@@ -188,8 +192,8 @@ impl Index {
         let changed = self.conn.execute(
             "INSERT INTO assets
                (address, width, height, taken_at, make, model,
-                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(address) DO NOTHING",
             rusqlite::params![
                 r.address,
@@ -206,6 +210,7 @@ impl Index {
                 r.sha1,
                 r.thumbhash,
                 i64::from(r.is_favorite),
+                r.description,
             ],
         )?;
         Ok(if changed == 0 {
@@ -254,7 +259,7 @@ impl Index {
     pub fn asset(&self, address: &str) -> Result<Option<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description
              FROM assets WHERE address = ?1 AND trashed_at IS NULL",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![address], |row| {
@@ -273,6 +278,7 @@ impl Index {
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
                 is_favorite: row.get::<_, i64>(13)? != 0,
+                description: row.get(14)?,
             })
         })?;
         match rows.next() {
@@ -361,7 +367,7 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1,
-                    thumbhash, is_favorite
+                    thumbhash, is_favorite, description
              FROM assets
              WHERE trashed_at IS NOT NULL
              ORDER BY trashed_at DESC",
@@ -382,6 +388,7 @@ impl Index {
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
                 is_favorite: row.get::<_, i64>(13)? != 0,
+                description: row.get(14)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -456,6 +463,39 @@ impl Index {
         Ok(doomed.len() as u64)
     }
 
+    /// Map markers: `(address, lat, lon)` for every untrashed asset that
+    /// carries GPS. City, state and country are not here — reversing a
+    /// coordinate into a name needs a gazetteer this vault does not ship;
+    /// the client renders the pin from the coordinate alone.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn map_markers(&self) -> Result<Vec<(String, f64, f64)>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, latitude, longitude
+             FROM assets
+             WHERE trashed_at IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL
+             ORDER BY taken_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
+    /// Set an asset's caption. Returns whether the asset exists.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn set_description(&self, address: &str, description: &str) -> Result<bool, IndexError> {
+        let changed = self.conn.execute(
+            "UPDATE assets SET description = ?2 WHERE address = ?1",
+            rusqlite::params![address, description],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Asset counts by kind — what the app's backup screen displays:
     /// `(images, videos, total)`.
     ///
@@ -514,7 +554,7 @@ impl Index {
         let mut sql = String::from(
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1,
-                    thumbhash, is_favorite
+                    thumbhash, is_favorite, description
              FROM assets",
         );
         if !clauses.is_empty() {
@@ -552,6 +592,7 @@ impl Index {
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
                 is_favorite: row.get::<_, i64>(13)? != 0,
+                description: row.get(14)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -588,7 +629,7 @@ impl Index {
     pub fn assets_in_day(&self, day: &str) -> Result<Vec<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite
+                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description
              FROM assets
              WHERE trashed_at IS NULL
                AND COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
@@ -610,6 +651,7 @@ impl Index {
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
                 is_favorite: row.get::<_, i64>(13)? != 0,
+                description: row.get(14)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -750,7 +792,7 @@ impl Index {
             "SELECT assets.address, assets.width, assets.height, assets.taken_at,
                     assets.make, assets.model, assets.latitude, assets.longitude,
                     assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1,
-                    assets.thumbhash, assets.is_favorite
+                    assets.thumbhash, assets.is_favorite, assets.description
              FROM album_assets m
              JOIN assets ON assets.address = m.address
              WHERE m.album_id = ?1
@@ -773,6 +815,7 @@ impl Index {
                 sha1: row.get(11)?,
                 thumbhash: row.get(12)?,
                 is_favorite: row.get::<_, i64>(13)? != 0,
+                description: row.get(14)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -1013,7 +1056,7 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT address, width, height, taken_at, make, model,
                     latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash,
-                    is_favorite, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
+                    is_favorite, description, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
              FROM assets
              WHERE taken_at IS NOT NULL
                AND trashed_at IS NULL
@@ -1041,8 +1084,9 @@ impl Index {
                     sha1: row.get(11)?,
                     thumbhash: row.get(12)?,
                     is_favorite: row.get::<_, i64>(13)? != 0,
+                    description: row.get(14)?,
                 },
-                row.get::<_, u32>(14)?,
+                row.get::<_, u32>(15)?,
             ))
         })?;
         let rows: Vec<(AssetRecord, u32)> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -1082,6 +1126,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
         "ALTER TABLE assets ADD COLUMN thumbhash TEXT",
         "ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE assets ADD COLUMN trashed_at TEXT",
+        "ALTER TABLE assets ADD COLUMN description TEXT NOT NULL DEFAULT ''",
     ];
     for sql in migrations {
         let result = conn.execute_batch(sql);
@@ -1116,7 +1161,8 @@ CREATE TABLE IF NOT EXISTS assets (
     sha1       TEXT,
     thumbhash  TEXT,
     is_favorite INTEGER NOT NULL DEFAULT 0,
-    trashed_at TEXT
+    trashed_at TEXT,
+    description TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 

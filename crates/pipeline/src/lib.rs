@@ -132,6 +132,7 @@ impl Pipeline {
             sha1: Some(sha1_hex),
             thumbhash: None,
             is_favorite: false,
+            description: String::new(),
         };
         index.record_asset(&record).map_err(PipelineError::Index)?;
         Ok(IngestReport {

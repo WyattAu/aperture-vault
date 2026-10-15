@@ -291,7 +291,7 @@ pub async fn features() -> ApiResult {
         "email": false,
         "facialRecognition": false,
         "importFaces": false,
-        "map": false,
+        "map": true,
         "oauth": false,
         "oauthAutoLaunch": false,
         "ocr": false,
@@ -1028,6 +1028,7 @@ fn asset_json(record: &aperture_index::AssetRecord, owner: &str, mime: &str) -> 
             "latitude": record.latitude,
             "longitude": record.longitude,
             "dateTimeOriginal": record.taken_at,
+            "description": record.description,
         },
     })
 }
@@ -1082,25 +1083,54 @@ pub async fn update_asset(
     body: String,
 ) -> ApiResult {
     require_user(&state, &headers)?;
-    #[derive(serde::Deserialize)]
-    struct Request {
-        #[serde(rename = "isFavorite")]
-        is_favorite: Option<bool>,
-    }
-    let req: Request =
+    // Unsupported keys are refused by name, never ignored: an update that
+    // pretends to succeed while dropping a field is a lie.
+    const SUPPORTED: [&str; 2] = ["isFavorite", "description"];
+    let parsed: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| ApiError::BadRequest(format!("json: {e}")))?;
-    let Some(favorite) = req.is_favorite else {
+    let unsupported: Vec<&String> = parsed
+        .as_object()
+        .map(|fields| {
+            fields
+                .keys()
+                .filter(|key| !SUPPORTED.contains(&key.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !unsupported.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "fields this vault does not model: {}",
+            unsupported
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let favorite = parsed.get("isFavorite").and_then(|v| v.as_bool());
+    let description = parsed.get("description").and_then(|v| v.as_str());
+    if favorite.is_none() && description.is_none() {
         return Err(ApiError::BadRequest(
-            "no supported field present; isFavorite is the one that exists".into(),
+            "no supported field present; isFavorite and description exist".into(),
         ));
-    };
+    }
     let addr = crate::cas_address(&id)?;
     let index = state.index.lock().map_err(|_| ApiError::Internal)?;
-    let changed = index
-        .set_favorite(&addr.hex(), favorite)
-        .map_err(|_| ApiError::Internal)?;
-    if !changed {
-        return Err(ApiError::NotFound);
+    if let Some(favorite) = favorite {
+        let changed = index
+            .set_favorite(&addr.hex(), favorite)
+            .map_err(|_| ApiError::Internal)?;
+        if !changed {
+            return Err(ApiError::NotFound);
+        }
+    }
+    if let Some(description) = description {
+        let changed = index
+            .set_description(&addr.hex(), description)
+            .map_err(|_| ApiError::Internal)?;
+        if !changed {
+            return Err(ApiError::NotFound);
+        }
     }
     let record = index
         .asset(&addr.hex())
@@ -1141,6 +1171,37 @@ pub async fn asset_statistics(
         .statistics()
         .map_err(|_| ApiError::Internal)?;
     json_ok(&json!({ "images": images, "videos": videos, "total": total }))
+}
+
+/// `GET /api/map/markers` — the pins: every untrashed asset that carries
+/// GPS, its coordinate and its id. City, state and country are null —
+/// reversing a coordinate into a name needs a gazetteer this vault does
+/// not ship, and the pin renders fine from the coordinate alone.
+pub async fn map_markers(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let markers = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .map_markers()
+        .map_err(|_| ApiError::Internal)?;
+    let items = markers
+        .into_iter()
+        .map(|(id, lat, lon)| {
+            json!({
+                "id": id,
+                "lat": lat,
+                "lon": lon,
+                "city": serde_json::Value::Null,
+                "state": serde_json::Value::Null,
+                "country": serde_json::Value::Null,
+            })
+        })
+        .collect::<Vec<_>>();
+    json_ok(&serde_json::Value::Array(items))
 }
 
 /// `DELETE /api/assets` — trash the named assets. With `force: true` the
@@ -1370,6 +1431,7 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/assets/statistics", get(asset_statistics))
         .route("/api/search/metadata", post(search_metadata))
         .route("/api/memories", get(memories))
+        .route("/api/map/markers", get(map_markers))
         .route("/api/trash", get(trash_view))
         .route("/api/trash/empty", post(trash_empty))
         .route("/api/trash/restore", post(trash_restore_all))

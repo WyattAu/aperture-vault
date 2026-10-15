@@ -1064,3 +1064,75 @@ async fn users_listing_shows_the_directory_without_secrets() {
         "password verifiers never leave the store"
     );
 }
+
+#[tokio::test]
+async fn map_markers_serve_coordinates_and_refuse_unsupported_updates() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    let address = upload_bytes(&mut router, &token, "geo.png", &real_png(90, 90)).await;
+
+    // Synthetic fixtures carry no EXIF, so the marker set is honestly empty.
+    let (status, markers) = send(&mut router, "GET", "/api/map/markers", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(markers.as_array().expect("array").is_empty());
+
+    // Description updates work and surface in the detail's EXIF block.
+    let body = serde_json::json!({ "description": "sunset over the harbor" }).to_string();
+    let (status, updated) = send(
+        &mut router,
+        "PUT",
+        &format!("/api/assets/{address}"),
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (_, detail) = send(
+        &mut router,
+        "GET",
+        &format!("/api/assets/{address}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(detail["exifInfo"]["description"], "sunset over the harbor");
+
+    // Both supported fields in one call is fine.
+    let body = serde_json::json!({ "isFavorite": true, "description": "starred" }).to_string();
+    let (status, updated) = send(
+        &mut router,
+        "PUT",
+        &format!("/api/assets/{address}"),
+        Some(&token),
+        Some(body.into_bytes()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["isFavorite"], true);
+    assert_eq!(updated["exifInfo"]["description"], "starred");
+
+    // Unsupported fields are refused by name, never ignored.
+    let body = serde_json::json!({ "rating": 5 }).to_string();
+    // Errors are plain text, so the body is read raw, not through the JSON
+    // helper.
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!("/api/assets/{address}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(body))
+        .expect("builds");
+    let response = router.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body")
+        .to_vec();
+    let message = String::from_utf8(text).expect("utf8");
+    assert!(
+        message.contains("rating"),
+        "the refusal names the field: {message}"
+    );
+
+    // The feature flag now says the map exists.
+    let (_, features) = send(&mut router, "GET", "/api/server/features", None, None).await;
+    assert_eq!(features["map"], serde_json::Value::Bool(true));
+}

@@ -123,6 +123,7 @@ fn the_index_is_rebuildable_from_the_cas_alone() {
                 sha1: None,
                 thumbhash: None,
                 is_favorite: false,
+                description: String::new(),
             })
             .expect("record");
     }

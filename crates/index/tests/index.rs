@@ -30,6 +30,7 @@ fn record(address: &str, taken_at: Option<&str>, name: &str) -> aperture_index::
         sha1: None,
         thumbhash: None,
         is_favorite: false,
+        description: String::new(),
     }
 }
 
@@ -361,4 +362,48 @@ fn favorite_flags_toggle_and_count_in_the_statistics() {
 
     // A favorite on a nonexistent asset reports the truth.
     assert!(!index.set_favorite("ghost", true).expect("set"));
+}
+
+#[test]
+fn map_markers_list_only_gps_carrying_untrashed_assets() {
+    let (_dir, index) = file_index();
+    let mut gps = record("gps", Some("2026-05-01T10:00:00"), "gps.jpg");
+    gps.latitude = Some(48.858_4);
+    gps.longitude = Some(2.294_5);
+    index.record_asset(&gps).expect("record");
+    index
+        .record_asset(&record("nogps", Some("2026-05-01T11:00:00"), "nogps.jpg"))
+        .expect("record");
+    let mut trashed = record("trashed", Some("2026-05-01T12:00:00"), "t.jpg");
+    trashed.latitude = Some(40.712_8);
+    trashed.longitude = Some(-74.006_0);
+    index.record_asset(&trashed).expect("record");
+    index.trash(&["trashed".into()]).expect("trash");
+
+    let markers = index.map_markers().expect("markers");
+    assert_eq!(markers.len(), 1, "no GPS, no marker; trashed, no marker");
+    let (address, lat, lon) = markers.first().expect("one marker");
+    assert_eq!(address, "gps");
+    assert!((lat - 48.858_4).abs() < 1e-9);
+    assert!(
+        (lon - 2.294_5).abs() < 1e-9,
+        "the Eiffel Tower's longitude too"
+    );
+}
+
+#[test]
+fn captions_are_set_and_persist() {
+    let (_dir, index) = file_index();
+    index
+        .record_asset(&record("a", Some("2026-05-01T10:00:00"), "a.jpg"))
+        .expect("record");
+    assert!(index
+        .set_description("a", "sunset over the harbor")
+        .expect("set"));
+    let record = index.asset("a").expect("query").expect("recorded");
+    assert_eq!(record.description, "sunset over the harbor");
+    assert!(
+        !index.set_description("ghost", "x").expect("set"),
+        "no asset, no caption"
+    );
 }

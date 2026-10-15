@@ -178,6 +178,17 @@
   3, the server sees them — re-pointing at the same folder is a no-op,
   which is the whole point of content addressing.
 
+- **Map markers + asset descriptions** — `GET /api/map/markers` serves the
+  pins from the GPS the probe has extracted since M1 (coordinates only;
+  city/state/country are honest nulls — reversing a coordinate into a
+  name needs a gazetteer this vault does not ship, and the pin renders
+  fine without one). `features.map` flipped to true because the map's
+  core now exists. `PUT /api/assets/{id}` gained `description` — the
+  caption is authorship, and camera-default EXIF descriptions are not
+  imported. Unsupported update fields are refused **by name** in the
+  error text, never silently ignored: an update that pretends to succeed
+  while dropping a field is a lie.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),
