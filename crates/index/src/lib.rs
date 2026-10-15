@@ -483,6 +483,22 @@ impl Index {
             .map_err(IndexError::from)
     }
 
+    /// Total bytes held by untrashed assets — the usage number the
+    /// server-statistics screen displays.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn usage_bytes(&self) -> Result<u64, IndexError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(sum(byte_len), 0) FROM assets WHERE trashed_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(IndexError::from)
+    }
+
     /// Set an asset's caption. Returns whether the asset exists.
     ///
     /// # Errors

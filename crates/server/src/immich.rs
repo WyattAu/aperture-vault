@@ -1295,6 +1295,41 @@ pub async fn download_archive(
         .map_err(|_| ApiError::Internal)
 }
 
+/// `GET /api/server/media-types` — the extensions the vault accepts, which
+/// is the set the probe can actually parse: nothing speculative.
+pub async fn media_types(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    json_ok(&json!({
+        "image": ["jpg", "jpeg", "png"],
+        "video": ["mp4"],
+        "sidecar": [],
+    }))
+}
+
+/// `GET /api/server/statistics` — the operator's counts: assets by kind and
+/// total bytes held. Single-user numbers, single row of truth.
+pub async fn server_statistics(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let index = state.index.lock().map_err(|_| ApiError::Internal)?;
+    let (photos, videos, _total) = index.statistics().map_err(|_| ApiError::Internal)?;
+    let usage = index.usage_bytes().map_err(|_| ApiError::Internal)?;
+    drop(index);
+    json_ok(&json!({
+        "photos": photos,
+        "videos": videos,
+        "usage": usage,
+        "usagePhotos": usage,
+        "usageVideos": 0,
+        "usageByUser": [],
+    }))
+}
+
 /// `DELETE /api/assets` — trash the named assets. With `force: true` the
 /// deletion is permanent in one step: the index rows and their memberships
 /// go, and the CAS blobs become unreferenced garbage for the horizon
@@ -1503,6 +1538,8 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/server/features", get(features))
         .route("/api/server/config", get(server_config))
         .route("/api/server/version", get(version))
+        .route("/api/server/media-types", get(media_types))
+        .route("/api/server/statistics", get(server_statistics))
         .route("/api/assets/bulk-upload-check", post(bulk_upload_check))
         .route("/api/timeline/buckets", get(timeline_buckets))
         .route("/api/timeline/bucket", get(timeline_bucket))

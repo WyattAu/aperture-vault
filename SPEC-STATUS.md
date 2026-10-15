@@ -199,6 +199,15 @@
   `name (1).ext` suffixes instead of silently overwriting; share keys
   reach exactly their album's members, as everywhere.
 
+- **Server surface completeness** — `GET /api/server/media-types` states
+  exactly what the probe parses (jpg/jpeg/png, mp4; sidecar empty), and
+  `GET /api/server/statistics` reports assets by kind plus total bytes
+  (`usagePhotos`/`usageVideos` carry the same byte total split
+  optimistically; per-kind byte tracking wants a column, not a guess).
+  `GET /api/config` — Immich's deep nested user-config object — is
+  deliberately absent: nothing reads it before login, and a config
+  surface nobody consumes is one more thing to keep honest.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

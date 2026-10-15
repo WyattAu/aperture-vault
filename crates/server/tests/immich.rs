@@ -1215,3 +1215,38 @@ async fn download_archive_delivers_a_real_zip_of_originals() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn server_media_types_and_statistics_state_the_truth() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    upload_bytes(&mut router, &token, "still.png", &real_png(100, 100)).await;
+
+    let (status, media) = send(
+        &mut router,
+        "GET",
+        "/api/server/media-types",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(media["image"], serde_json::json!(["jpg", "jpeg", "png"]));
+    assert_eq!(media["video"], serde_json::json!(["mp4"]));
+    assert_eq!(media["sidecar"], serde_json::json!([]));
+
+    let (_, stats) = send(
+        &mut router,
+        "GET",
+        "/api/server/statistics",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(stats["photos"], 1);
+    assert_eq!(stats["videos"], 0);
+    assert!(
+        stats["usage"].as_u64().is_some_and(|u| u > 0),
+        "bytes were uploaded"
+    );
+    assert_eq!(stats["usageByUser"], serde_json::json!([]));
+}
