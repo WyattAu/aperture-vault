@@ -1,0 +1,5 @@
+name = "aperture_proofs"
+defaultTargets = ["Aperture"]
+
+[[lean_lib]]
+name = "Aperture"

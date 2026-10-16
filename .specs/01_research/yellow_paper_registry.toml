@@ -1,0 +1,85 @@
+# Yellow Paper Registry — aperture-vault research loop 2026-10-15/16
+# Format mirrors the estate's Clawdius registry.
+
+[metadata]
+last_updated = "2026-10-16T00:00:00Z"
+total_papers = 10
+loop = "research-loop-2026-10-15"
+parts_covered = ["cas", "gc", "crypto", "auth", "index", "pipeline", "server"]
+
+[[yellow_paper]]
+id = "YP-CAS-CHUNKING-001"
+title = "Content-Defined Chunking — Refused for a Photo Workload"
+status = "APPROVED (refusal)"
+domain = "Storage Systems / Deduplication"
+proof_files = ["Cas.lean"]
+algorithms = ["ALG-CAS-WHOLEFILE-001"]
+theorems = ["ingest_is_idempotent", "different_bytes_different_addresses"]
+
+[[yellow_paper]]
+id = "YP-CAS-GC-002"
+title = "Garbage Collection — the Blob Leak the Sweep Never Covered"
+status = "APPROVED (gap found, fix implemented)"
+domain = "Storage Systems / Garbage Collection"
+proof_files = ["Cas.lean"]
+algorithms = ["ALG-GC-MARKSWEEP-001"]
+theorems = ["gc_safety"]
+
+[[yellow_paper]]
+id = "YP-CRYPTO-SHA1-003"
+title = "SHA-1 Is a Hint — BLAKE3 Is the Identity"
+status = "APPROVED (hardening implemented)"
+domain = "Cryptography / Hash Function Deprecation"
+proof_files = ["Cas.lean", "Policy.lean"]
+theorems = ["different_bytes_different_addresses", "ambiguous_never_skips"]
+
+[[yellow_paper]]
+id = "YP-CRYPTO-ATREST-004"
+title = "At-Rest Encryption — Refused in Favor of the Layer That Already Exists"
+status = "APPROVED (refusal, documented)"
+domain = "Cryptography / Encryption at Rest"
+proof_files = []
+
+[[yellow_paper]]
+id = "YP-AUTH-REVOCATION-005"
+title = "Session Revocation — the Registry Between the Signature and the Answer"
+status = "APPROVED (implemented + proven)"
+domain = "Authentication / Session Management"
+proof_files = ["Auth.lean"]
+theorems = ["logout_revokes", "logout_twice_idempotent"]
+
+[[yellow_paper]]
+id = "YP-AUTH-BRUTEFORCE-006"
+title = "Brute-Force Lockout — Silence Without an Oracle"
+status = "APPROVED (implemented + proven)"
+domain = "Authentication / Online Guessing Defence"
+proof_files = ["Auth.lean"]
+theorems = ["locked_has_no_oracle", "success_forgives"]
+
+[[yellow_paper]]
+id = "YP-INDEX-SEARCH-007"
+title = "Search — LIKE Is Honest Until the Corpus Says Otherwise"
+status = "APPROVED (refusal at this scale)"
+domain = "Information Retrieval / Embedded Search"
+proof_files = []
+
+[[yellow_paper]]
+id = "YP-PIPELINE-THUMBS-008"
+title = "Thumbnails — Already on the Cutting Edge, Verified Against the Field"
+status = "APPROVED (cutting edge confirmed)"
+domain = "Media Processing / Thumbnails and Placeholders"
+proof_files = []
+
+[[yellow_paper]]
+id = "YP-PIPELINE-PHASH-009"
+title = "Near-Duplicate Detection — pHash Is the ML-Free Cutting Edge"
+status = "APPROVED (spec'd, implementation deferred)"
+domain = "Media Processing / Near-Duplicate Detection"
+proof_files = []
+
+[[yellow_paper]]
+id = "YP-SERVER-CONCURRENCY-010"
+title = "Concurrency — Tokio Retained, io_uring Refused (Twice), the Blocking Rule Made Load-Bearing"
+status = "APPROVED (refusals documented, gap closed)"
+domain = "Server Systems / Concurrency and Transport"
+proof_files = []
