@@ -26,21 +26,28 @@ axiom member : AlbumId → AssetId → Bool
 /-- **Authorization rule.** A session grants everything (modelled: always
 authorized); a share key grants exactly the members of its album.
 Mirrors `authorize_asset`. -/
-def authorize (sessionValid : Bool) (keyAlbumOpt : Option AlbumId) (asset : AssetId) : Bool :=
-  sessionValid || (keyAlbumOpt.isSome && member keyAlbumOpt.get asset)
+noncomputable def authorize (sessionValid : Bool) (keyAlbumOpt : Option AlbumId)
+    (asset : AssetId) : Bool :=
+  sessionValid
+    || match keyAlbumOpt with
+      | some album => member album asset
+      | none => false
 
 /-- **Theorem (share scoping).** If a share key (no session) authorizes
-an asset, that asset is a member of the key's album. This is the
-machine-checked form of "a share key reaches exactly its album's
-members" — the guarantee the share-link arc pinned in tests. -/
-theorem share_scoping (key : Key) (asset : AssetId) :
-    authorize false (keyAlbum key) asset = true →
-    member (keyAlbum key).get asset = true := by
-  intro hauth
-  unfold authorize at hauth
-  by_cases hsome : keyAlbum key |>.isSome
-  · simpa [hsome] using hauth
-  · simp [hsome] at hauth
+an asset, that asset is a member of the key's album — for ANY option,
+proven by cases; the caller instantiates `keyAlbum key`. Machine-checked
+form of "a share key reaches exactly its album's members." -/
+theorem share_scoping (albumOpt : Option AlbumId) (asset : AssetId)
+    (hknown : albumOpt.isSome = true)
+    (hauth : authorize false albumOpt asset = true) :
+    member (albumOpt.get hknown) asset = true := by
+  cases albumOpt with
+  | none => simp at hknown
+  | some album =>
+      have hmem : member album asset = true := by
+        unfold authorize at hauth
+        simpa using hauth
+      simpa using hmem
 
 /-! ## Trash exclusion -/
 
