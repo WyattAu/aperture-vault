@@ -104,6 +104,26 @@ pub fn thumbnail(
     let original = store.get_bytes(source)?;
     let decoded = image::load_from_memory(&original).map_err(|_| PipelineError::NotAnImage)?;
 
+    // The pHash rides the same decode (one read of the original, three
+    // derived artifacts) — YP-PIPELINE-PHASH-009. hash_rgba downsamples
+    // by box-average internally; a Triangle pre-resize here would be a
+    // SECOND resampler whose output diverges from the standalone phash
+    // path (measured: Hamming 24 between the two resamplers on the same
+    // image). One downsample rule, everywhere. Recorded before the
+    // thumbnail so a failed thumbnail encode never loses the cheaper
+    // artifact.
+    {
+        let rgba = decoded.to_rgba8();
+        let (w, h) = (
+            usize::try_from(rgba.width()).unwrap_or(32),
+            usize::try_from(rgba.height()).unwrap_or(32),
+        );
+        let hex = crate::phash::hash_rgba(rgba.as_raw(), w, h);
+        index
+            .record_phash(&source_hex, &hex)
+            .map_err(PipelineError::Index)?;
+    }
+
     // The ThumbHash placeholder comes from the same decode: one read of the
     // original pays for both derived artifacts. The reference downsamples
     // input to at most 100 px before encoding; do the same so the hash is

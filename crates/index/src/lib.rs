@@ -539,6 +539,23 @@ impl Index {
         Ok(())
     }
 
+    /// Every untrashed asset that carries a perceptual hash:
+    /// `(address, phash_hex)`. The duplicate search walks this list.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn all_phashes(&self) -> Result<Vec<(String, String)>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT address, phash FROM assets
+             WHERE trashed_at IS NULL AND phash IS NOT NULL
+             ORDER BY taken_at DESC, address ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
     /// Set an asset's caption. Returns whether the asset exists.
     ///
     /// # Errors

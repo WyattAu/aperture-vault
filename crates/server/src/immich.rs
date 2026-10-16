@@ -1257,6 +1257,47 @@ pub async fn asset_statistics(
     json_ok(&json!({ "images": images, "videos": videos, "total": total }))
 }
 
+/// `GET /api/search/duplicates` — near-duplicate groups from the
+/// perceptual hashes: greedy clustering at Hamming distance ≤ 10 of the
+/// group's first member. Compute-on-request by design — Immich stores
+/// ML-detected duplicates; the vault derives them from the pHash the
+/// thumbnail path already paid for, so the feature has no job, no model,
+/// and no stored state to keep honest.
+pub async fn search_duplicates(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    require_user(&state, &headers)?;
+    let all = state
+        .index
+        .lock()
+        .map_err(|_| ApiError::Internal)?
+        .all_phashes()
+        .map_err(|_| ApiError::Internal)?;
+    // Clusters are (seed hash, member addresses): the seed hash is what
+    // candidates compare against, the members are what the response
+    // returns.
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (address, hash) in &all {
+        let target = groups
+            .iter_mut()
+            .find(|(seed, _members)| aperture_pipeline::phash::near_duplicate(seed, hash));
+        match target {
+            Some((_seed, members)) => members.push(address.clone()),
+            None => groups.push((hash.clone(), vec![address.clone()])),
+        }
+    }
+    let grouped: Vec<serde_json::Value> = groups
+        .into_iter()
+        .filter(|(_seed, members)| members.len() > 1)
+        .map(|(_seed, members)| {
+            let size = members.len();
+            json!({ "assets": members, "size": size })
+        })
+        .collect();
+    json_ok(&json!({ "groups": grouped, "totalGroups": grouped.len() }))
+}
+
 /// `GET /api/map/markers` — the pins: every untrashed asset that carries
 /// GPS, its coordinate and its id. City, state and country are null —
 /// reversing a coordinate into a name needs a gazetteer this vault does
@@ -1647,6 +1688,7 @@ pub fn immich_router(state: AppState) -> axum::Router {
         .route("/api/search/metadata", post(search_metadata))
         .route("/api/memories", get(memories))
         .route("/api/map/markers", get(map_markers))
+        .route("/api/search/duplicates", get(search_duplicates))
         .route("/api/download/archive", post(download_archive))
         .route("/api/trash", get(trash_view))
         .route("/api/trash/empty", post(trash_empty))

@@ -1335,3 +1335,129 @@ async fn sessions_are_listed_and_revocable_one_by_one() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn duplicates_group_near_duplicates_and_leave_distinct_assets_alone() {
+    let (_dir, mut router, token) = app_with_user("wyatt@example.com");
+    // The same scene rendered twice — the resize duplicate class pHash
+    // exists for.
+    let scene = |x: u32, y: u32, w: u32, h: u32| {
+        // The 1/f spectral fixture from the phash suite: photo-like
+        // coefficient spread, so the median threshold is stable across
+        // resolutions. (Separable-sinusoid scenes are degenerate: dozens
+        // of near-zero coefficients cluster at the median and flip on
+        // float noise — measured Hamming 30 for two renders of the SAME
+        // image before this fixture.)
+        let xn = f64::from(x) / f64::from(w.saturating_sub(1).max(1));
+        let yn = f64::from(y) / f64::from(h.saturating_sub(1).max(1));
+        let terms = [
+            (1.0, 0.0, 40.0),
+            (0.0, 1.0, 32.0),
+            (2.0, 1.0, 18.0),
+            (1.0, 3.0, 12.0),
+            (4.0, 0.0, 9.0),
+            (0.0, 5.0, 7.0),
+            (3.0, 4.0, 5.0),
+            (6.0, 2.0, 4.0),
+            (2.0, 7.0, 3.0),
+            (8.0, 1.0, 2.0),
+            (5.0, 6.0, 2.0),
+            (11.0, 3.0, 1.5),
+        ];
+        let sum: f64 = terms
+            .iter()
+            .map(|(kx, ky, amplitude)| {
+                let phase = (kx * 7.0 + ky * 13.0) * core::f64::consts::FRAC_PI_4;
+                amplitude * (2.0 * core::f64::consts::PI * (kx * xn + ky * yn) + phase).sin()
+            })
+            .sum();
+        let clamp = |v: f64| v.clamp(0.0, 255.0) as u8;
+        [
+            clamp(128.0 + sum),
+            clamp(128.0 + yn * 100.0),
+            clamp(255.0 - xn * 255.0),
+        ]
+    };
+    let twin_a = upload_bytes(
+        &mut router,
+        &token,
+        "a.png",
+        &rgba_from(|x, y| scene(x, y, 256, 256), 256, 256),
+    )
+    .await;
+    let twin_b = upload_bytes(
+        &mut router,
+        &token,
+        "b.png",
+        &rgba_from(|x, y| scene(x, y, 128, 128), 128, 128),
+    )
+    .await;
+    let other = upload_bytes(
+        &mut router,
+        &token,
+        "other.png",
+        &rgba_from(
+            |x, y| {
+                if (x / 8 + y / 8) % 2 == 0 {
+                    [255, 255, 255]
+                } else {
+                    [0, 0, 0]
+                }
+            },
+            200,
+            200,
+        ),
+    )
+    .await;
+
+    // Derive thumbnails: the pHash rides the same decode.
+    for asset in [&twin_a, &twin_b, &other] {
+        let uri = format!("/api/assets/{asset}/thumbnail");
+        let request = Request::builder()
+            .uri(&uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("builds");
+        let response = router.clone().oneshot(request).await.expect("responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let (status, found) = send(
+        &mut router,
+        "GET",
+        "/api/search/duplicates",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let groups = found["groups"].as_array().expect("groups");
+    assert_eq!(found["totalGroups"], 1);
+    assert_eq!(groups.len(), 1);
+    let assets = groups[0]["assets"].as_array().expect("assets");
+    assert_eq!(assets.len(), 2, "the two renders of one scene group");
+    // Order within the group is the index's (capture-time tie goes to the
+    // address); the test asserts membership, not order.
+    assert!(assets.contains(&serde_json::json!(twin_a)));
+    assert!(assets.contains(&serde_json::json!(twin_b)));
+    let rendered = serde_json::to_string(&found).expect("serializes");
+    assert!(
+        !rendered.contains(other.as_str()),
+        "the distinct asset stays out"
+    );
+}
+
+fn rgba_from(draw: impl Fn(u32, u32) -> [u8; 3], width: u32, height: u32) -> Vec<u8> {
+    use image::DynamicImage;
+    let img = DynamicImage::ImageRgb8({
+        let mut buffer = image::RgbImage::new(width, height);
+        for (x, y, pixel) in buffer.enumerate_pixels_mut() {
+            *pixel = image::Rgb(draw(x, y));
+        }
+        buffer
+    });
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encodes");
+    png
+}
