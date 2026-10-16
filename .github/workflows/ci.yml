@@ -37,12 +37,23 @@ jobs:
           # gate passing while silently skipping the sibling.
           token: ${{ secrets.ESTATE_TOKEN || github.token }}
 
-      - name: place the sibling where the path dependency resolves
+      - name: checkout the dsp-spectral sibling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: WyattAu/dsp-spectral
+          ref: main
+          path: dsp-spectral-sibling
+          persist-credentials: false
+          token: ${{ secrets.ESTATE_TOKEN || github.token }}
+
+      - name: place the siblings where the path dependencies resolve
         run: |
-          # crates/probe -> ../../../mp4-core resolves one level above this
-          # repository; actions/checkout cannot write there, so the checked-out
-          # sibling is symlinked into place.
+          # crates/probe -> ../../../mp4-core and crates/pipeline ->
+          # ../../../dsp-spectral resolve one level above this repository;
+          # actions/checkout cannot write there, so the checked-out
+          # siblings are symlinked into place.
           ln -s "$GITHUB_WORKSPACE/mp4-core-sibling" "$(dirname "$GITHUB_WORKSPACE")/mp4-core"
+          ln -s "$GITHUB_WORKSPACE/dsp-spectral-sibling" "$(dirname "$GITHUB_WORKSPACE")/dsp-spectral"
           ls -la "$(dirname "$GITHUB_WORKSPACE")"
 
       - name: install the toolchain
