@@ -222,6 +222,40 @@
   a lockout that named itself would be an account-existence oracle; the
   timing difference (no hash burned) is the documented residual.
 
+## Research loop 2026-10-15/16 — 10 iterations, 2 gaps closed
+
+The Clawdius pattern applied to this repo: for every part — CAS dedup,
+GC, checksums, at-rest crypto, session auth, brute-force defence,
+search, thumbnails, near-dup detection, transport — the loop pulled the
+literature, compared against restic/borg/kopia/Immich, decided in a
+Yellow Paper, proved the core claims in Lean, and implemented what won.
+See `.specs/01_research/` (10 YPs + registry) and
+`.specs/02_architecture/proofs/` (Cas.lean, Auth.lean, Policy.lean —
+verified with `lake env lean <file>`).
+
+Gaps the loop found and closed:
+
+1. **Blob GC** (YP-CAS-GC-002) — trash-empty removed rows while CAS
+   blobs leaked forever; the M0 sweeper only collects staging files.
+   `Pipeline::gc` + `aperture-server gc`: mark-sweep from the index's
+   reachability set (assets ∪ derived), operator-run, proven by
+   `gc_safety` in the proof suite. Dogfooded: orphan removed, marked
+   originals still serve.
+2. **SHA-1 ambiguity hardening** (YP-CRYPTO-SHA1-003) — a SHA-1
+   collision could make bulk-upload-check claim "already have it" about
+   bytes the vault does not hold. Now: `assets_by_sha1` returns *all*
+   matches, and ambiguity answers **accept** — proven by
+   `ambiguous_never_skips` in Policy.lean.
+
+Refusals with reasons (so the next agent reads, not re-litigates):
+content-defined chunking (photos are immutable; CDC wins on deltas the
+workload lacks), at-rest application-layer crypto (LUKS posture; age
+becomes mandatory with any remote backend), libvips (unsafe/C vs
+image-rs purity), PASETO (tokenkit already pins the algorithm — the
+RFC 8725 subset), FTS5 (tripwire: ~10⁷ rows or double-digit-ms scans),
+smart-search ML (pHash specified instead — YP-PIPELINE-PHASH-009, gated
+on burst-corpus testing).
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

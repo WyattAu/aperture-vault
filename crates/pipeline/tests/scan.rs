@@ -77,3 +77,45 @@ fn failures_are_reported_not_fatal() {
     assert_eq!(report.ingested, 1);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
 }
+
+#[test]
+fn gc_removes_orphans_and_keeps_every_marked_object() {
+    let (dir, store, index) = env();
+    // One real asset through the pipeline.
+    let asset = {
+        let photos = dir.path().join("photos");
+        std::fs::create_dir_all(&photos).expect("dir");
+        std::fs::write(photos.join("keep.jpg"), b"the keeper").expect("write");
+        aperture_pipeline::Pipeline::ingest(
+            &store,
+            &index,
+            std::io::Cursor::new(b"the keeper"),
+            Some("keep.jpg"),
+        )
+        .expect("ingests")
+        .address
+    };
+
+    // An orphan: bytes in the CAS with no index row (the crash-window
+    // shape, or the post-trash-empty shape).
+    let (_orphan_addr, newly) = store
+        .put_bytes(b"orphaned bytes nobody references")
+        .expect("writes");
+    assert!(newly);
+
+    // Mark set: the asset + nothing else. GC takes the orphan, keeps the asset.
+    let report = aperture_pipeline::gc::gc(&store, &index).expect("gc");
+    assert_eq!(report.removed, 1);
+    assert_eq!(report.kept, 1);
+    assert!(
+        store.has(&asset),
+        "a marked object survives the sweep — YP-CAS-GC-002 gc_safety"
+    );
+
+    // And after trash-empty of the owner, its blob is the next orphan.
+    index.trash(&[asset.hex()]).expect("trash");
+    index.trash_empty().expect("empty");
+    let report = aperture_pipeline::gc::gc(&store, &index).expect("gc");
+    assert_eq!(report.removed, 1);
+    assert!(!store.has(&asset), "emptied trash is reclaimed");
+}

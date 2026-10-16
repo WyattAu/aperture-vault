@@ -407,3 +407,24 @@ fn captions_are_set_and_persist() {
         "no asset, no caption"
     );
 }
+
+#[test]
+fn a_colliding_checksum_is_reported_as_ambiguity() {
+    let (_dir, index) = file_index();
+    let mut one = record("one", None, "one.jpg");
+    one.sha1 = Some(bogus_sha1().into());
+    let mut two = record("two", None, "two.jpg");
+    two.sha1 = Some(bogus_sha1().into());
+    index.record_asset(&one).expect("record");
+    index.record_asset(&two).expect("record");
+
+    // YP-CRYPTO-SHA1-003: the collision case surfaces as MULTIPLE rows,
+    // so the endpoint can answer accept instead of naming a winner it
+    // cannot honestly know.
+    let matches = index.assets_by_sha1(bogus_sha1()).expect("query");
+    assert_eq!(matches.len(), 2);
+}
+
+fn bogus_sha1() -> &'static str {
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+}

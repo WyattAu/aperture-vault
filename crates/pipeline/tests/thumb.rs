@@ -182,3 +182,15 @@ fn thumbhash_of_a_non_image_is_refused() {
         Err(aperture_pipeline::PipelineError::NotAnImage)
     ));
 }
+
+#[test]
+fn derived_blobs_are_marked_too() {
+    let (_dir, store, index) = env();
+    let source = ingest_png(&store, &index, 200, 150);
+    let _ = thumbnail(&store, &index, &source, ThumbSize::Thumbnail).expect("derives");
+    // The derived blob has no assets row; it is referenced through the
+    // derived table — the mark set must include it or every thumbnail
+    // would die at the first gc.
+    let report = aperture_pipeline::gc::gc(&store, &index).expect("gc");
+    assert_eq!(report.removed, 0, "derived mappings are reachability roots");
+}

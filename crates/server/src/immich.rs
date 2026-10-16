@@ -390,19 +390,23 @@ pub async fn bulk_upload_check(
         .iter()
         .map(|item| {
             let hex = checksum_to_hex(&item.checksum);
-            let known = hex
+            let matches = hex
                 .as_deref()
-                .and_then(|hex| index.asset_by_sha1(hex).ok())
-                .flatten();
-            match known {
-                Some(asset_id) => json!({
+                .and_then(|hex| index.assets_by_sha1(hex).ok())
+                .unwrap_or_default();
+            // Exactly one match is a duplicate; anything else — none, or
+            // several (a SHA-1 collision) — is accept. YP-CRYPTO-SHA1-003:
+            // ambiguity never produces a skip, and the upload itself
+            // resolves identity by BLAKE3.
+            match matches.as_slice() {
+                [single] => json!({
                     "action": "reject",
                     "id": item.id,
-                    "assetId": asset_id,
+                    "assetId": single,
                     "isTrashed": false,
                     "reason": "duplicate",
                 }),
-                None => json!({ "action": "accept", "id": item.id }),
+                _ => json!({ "action": "accept", "id": item.id }),
             }
         })
         .collect();

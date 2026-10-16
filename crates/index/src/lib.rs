@@ -309,6 +309,23 @@ impl Index {
             })
     }
 
+    /// Every asset carrying `hex` as its SHA-1. Usually zero or one rows;
+    /// *more than one* is the collision case, and the bulk-upload-check
+    /// answers `accept` on it — YP-CRYPTO-SHA1-003: ambiguity never
+    /// produces a skip.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn assets_by_sha1(&self, hex: &str) -> Result<Vec<String>, IndexError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT address FROM assets WHERE sha1 = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![hex], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(IndexError::from)
+    }
+
     /// Store an asset's ThumbHash placeholder (base64), after generation.
     ///
     /// # Errors
@@ -496,6 +513,22 @@ impl Index {
                 [],
                 |row| row.get(0),
             )
+            .map_err(IndexError::from)
+    }
+
+    /// The mark set for garbage collection: every address the index still
+    /// wants — live assets and derived blobs. YP-CAS-GC-002: anything in
+    /// the objects root absent from this set is unreferenced garbage.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn mark_set(&self) -> Result<std::collections::HashSet<String>, IndexError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT address FROM assets UNION SELECT address FROM derived")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()
             .map_err(IndexError::from)
     }
 

@@ -11,6 +11,10 @@
 //! - `aperture-server add-user <vault-root> <email> <password>` — create
 //!   the first user. There is no admin-signup dance; an account exists
 //!   because the operator ran this.
+//! - `aperture-server scan <vault-root> <directory>` — ingest a folder
+//!   tree, skipping what the vault already holds by checksum.
+//! - `aperture-server gc <vault-root>` — mark-sweep the objects root
+//!   against the index (YP-CAS-GC-002). Operator-run, never automatic.
 
 #![allow(clippy::expect_used)]
 
@@ -41,6 +45,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (path, reason) in &report.failed {
             eprintln!("  failed: {}: {reason}", path.display());
         }
+        return Ok(());
+    }
+    if first == "gc" {
+        let root: PathBuf = args.next().map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("usage: aperture-server gc <vault-root>");
+            std::process::exit(2);
+        });
+        let state = aperture_server::AppState::new(&root)?;
+        let index = state.lock_index()?;
+        let report =
+            aperture_pipeline::gc::gc(state.store(), &index).map_err(|e| format!("gc: {e}"))?;
+        eprintln!(
+            "gc: removed {} objects, reclaimed {} bytes, kept {} marked",
+            report.removed, report.bytes_reclaimed, report.kept
+        );
         return Ok(());
     }
     if first == "add-user" {
