@@ -31,6 +31,7 @@ fn record(address: &str, taken_at: Option<&str>, name: &str) -> aperture_index::
         thumbhash: None,
         is_favorite: false,
         description: String::new(),
+        phash: None,
     }
 }
 

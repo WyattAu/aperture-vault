@@ -1,7 +1,7 @@
 ---
 document_id: YP-PIPELINE-PHASH-009
 version: 1.0.0
-status: APPROVED (spec'd, implementation deferred)
+status: APPROVED (implemented)
 domain: Media Processing / Near-Duplicate Detection
 subdomains: [Perceptual Hashing, DCT pHash, ML Embeddings]
 created: 2026-10-15
@@ -46,16 +46,26 @@ photo vault actually needs (burst shots, exports, re-saves), and it
 arrives without a model download, a GPU, or an inference lifecycle —
 the exact trade Immich's ML stack pays and this vault refused.
 
-## YP-4: Spec consequence — deferred, deliberately
+## YP-4: Spec consequence — implemented
 
-The YP is the spec; implementation is deferred behind two gates that
-this loop refuses to skip:
+`aperture-pipeline::phash`: grayscale → 32×32 box-downsample →
+separable 2-D DCT-II via the estate's `dsp-spectral::dct2` (the dogfood
+the YP predicted — the transform was extracted from the MFCC path into
+`dsp-spectral/src/dct.rs` for exactly this) → low-frequency 8×8 block
+minus DC → median threshold → 64-bit hash, hex-stored in the `phash`
+column (additive migration), computed on the same decode that yields
+the thumbnail (M4's one-decode rule).
 
-1. The decode cost: pHash needs a full decode per image. It rides the
-   thumbnail-derivation path (one decode, three artifacts — M4's rule)
-   *after* the column migration, exactly like thumbhash did.
-2. The threshold is workload-dependent: the 10-bit default ships behind
-   a test on a burst-shot corpus before the endpoint exists.
+The fixture lesson is recorded because the first test image was a
+pure linear gradient: a degenerate DCT where two coefficients carry all
+the energy and the median threshold flips on float noise — Hamming 30
+for two renders of the SAME image. The corrected fixture is a 1/f
+spectral scene (amplitude ~ 1/(kx+ky+1), deterministic phases): with a
+photo-like spectrum, resize and brightness perturbations sit within the
+≤10 threshold and a checkerboard sits far outside. Synthetic-image
+hash tests must use photo-like spectra or they test the fixture, not
+the algorithm.
 
-Deferred, not refused: the YP is the anchor so the implementation arc
-starts from the design, not from a search.
+`GET /api/search/duplicates` and the burst-corpus threshold tuning
+remain the next implementation slice; `near_duplicate` (Hamming ≤ 10)
+is the exported rule.

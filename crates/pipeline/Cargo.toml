@@ -15,6 +15,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 base64 = "0.22"
 thumbhash = "0.1"
 sha1 = "0.10"
+dsp-spectral = { version = "0.1", path = "../../../dsp-spectral" }
 aperture-probe = { version = "0.1", path = "../probe" }
 aperture-index = { version = "0.1", path = "../index" }
 thiserror = "2"
@@ -23,6 +24,7 @@ thiserror = "2"
 base64 = "0.22"
 thumbhash = "0.1"
 sha1 = "0.10"
+dsp-spectral = { version = "0.1", path = "../../../dsp-spectral" }
 tempfile = "3"
 
 [lints.rust]

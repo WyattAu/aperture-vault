@@ -133,6 +133,7 @@ impl Pipeline {
             thumbhash: None,
             is_favorite: false,
             description: String::new(),
+            phash: None,
         };
         index.record_asset(&record).map_err(PipelineError::Index)?;
         Ok(IngestReport {
@@ -161,5 +162,6 @@ pub enum PipelineError {
 }
 
 pub mod gc;
+pub mod phash;
 pub mod scan;
 pub mod thumb;

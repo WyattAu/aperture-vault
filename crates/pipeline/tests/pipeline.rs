@@ -124,6 +124,7 @@ fn the_index_is_rebuildable_from_the_cas_alone() {
                 thumbhash: None,
                 is_favorite: false,
                 description: String::new(),
+                phash: None,
             })
             .expect("record");
     }

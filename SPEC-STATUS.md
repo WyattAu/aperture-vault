@@ -264,6 +264,26 @@ RFC 8725 subset), FTS5 (tripwire: ~10⁷ rows or double-digit-ms scans),
 smart-search ML (pHash specified instead — YP-PIPELINE-PHASH-009, gated
 on burst-corpus testing).
 
+- **pHash shipped** (YP-PIPELINE-PHASH-009, implemented from the spec):
+  `aperture-pipeline::phash` — grayscale → 32×32 box-downsample →
+  separable 2-D DCT-II → low-frequency 8×8 block minus DC → median
+  threshold → 64-bit hash, hex-stored (additive migration) and computed
+  on the same decode that yields the thumbnail. The transform is the
+  estate's own `dsp-spectral::dct2` — extracted from the MFCC path into
+  a standalone primitive for exactly this, the dogfood the YP predicted.
+  The fixture lesson is in the YP: a linear-gradient test image has a
+  degenerate DCT (two coefficients carry everything; the median
+  threshold flips on float noise — Hamming 30 for two renders of the
+  SAME image). The corrected 1/f spectral fixture keeps photo-like
+  coefficient spread: resize and brightness perturbations within the
+  ≤10 threshold, a checkerboard far outside. `near_duplicate` (Hamming
+  ≤ 10) is the exported rule; `GET /api/search/duplicates` is the next
+  slice. The wide-table tax struck again (three SELECTs drifted without
+  the phash column — caught by the memories/search/trash tests), and
+  the fix is structural: one `ASSET_COLUMNS` constant + one
+  `read_asset` row mapper, so the next column is two edits, not six
+  hand-copied queries.
+
 ## Dogfood used
 
 `mp4-core` (video probe; contributed `read_video_dimensions_in` upstream),

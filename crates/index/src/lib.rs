@@ -19,6 +19,36 @@
 
 use rusqlite::Connection;
 
+/// The asset columns every read selects, in the order [`read_asset`]
+/// consumes them. One list, one mapper: adding a column is editing this
+/// constant and the mapper — never a dozen hand-copied SELECTs. (The
+/// phash migration broke three queries that had drifted out of sync;
+/// this refactor is that lesson turned into structure.)
+const ASSET_COLUMNS: &str = "address, width, height, taken_at, make, model, \
+     latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, \
+     is_favorite, description, phash";
+
+fn read_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetRecord> {
+    Ok(AssetRecord {
+        address: row.get(0)?,
+        width: row.get(1)?,
+        height: row.get(2)?,
+        taken_at: row.get(3)?,
+        make: row.get(4)?,
+        model: row.get(5)?,
+        latitude: row.get(6)?,
+        longitude: row.get(7)?,
+        duration_ms: row.get(8)?,
+        byte_len: row.get(9)?,
+        file_name: row.get(10)?,
+        sha1: row.get(11)?,
+        thumbhash: row.get(12)?,
+        is_favorite: row.get::<_, i64>(13)? != 0,
+        description: row.get(14)?,
+        phash: row.get(15)?,
+    })
+}
+
 /// The opened index.
 pub struct Index {
     conn: Connection,
@@ -127,6 +157,10 @@ pub struct AssetRecord {
     /// the camera are not imported: a caption is authorship, and the
     /// camera's is a default nobody reads.
     pub description: String,
+    /// Hex perceptual hash (pHash), computed when a thumbnail is derived.
+    /// Hamming distance ≤ 10 between two assets' hashes means candidate
+    /// near-duplicates — the ML-free answer to Immich's embedding stack.
+    pub phash: Option<String>,
 }
 
 /// One timeline entry: the address, its capture day, and display time.
@@ -192,8 +226,8 @@ impl Index {
         let changed = self.conn.execute(
             "INSERT INTO assets
                (address, width, height, taken_at, make, model,
-                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description, phash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(address) DO NOTHING",
             rusqlite::params![
                 r.address,
@@ -211,6 +245,7 @@ impl Index {
                 r.thumbhash,
                 i64::from(r.is_favorite),
                 r.description,
+                r.phash,
             ],
         )?;
         Ok(if changed == 0 {
@@ -258,29 +293,9 @@ impl Index {
     /// [`IndexError`] on database failure.
     pub fn asset(&self, address: &str) -> Result<Option<AssetRecord>, IndexError> {
         let mut stmt = self.conn.prepare(
-            "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description
-             FROM assets WHERE address = ?1 AND trashed_at IS NULL",
+            &format!("SELECT {ASSET_COLUMNS}              FROM assets WHERE address = ?1 AND trashed_at IS NULL"),
         )?;
-        let mut rows = stmt.query_map(rusqlite::params![address], |row| {
-            Ok(AssetRecord {
-                address: row.get(0)?,
-                width: row.get(1)?,
-                height: row.get(2)?,
-                taken_at: row.get(3)?,
-                make: row.get(4)?,
-                model: row.get(5)?,
-                latitude: row.get(6)?,
-                longitude: row.get(7)?,
-                duration_ms: row.get(8)?,
-                byte_len: row.get(9)?,
-                file_name: row.get(10)?,
-                sha1: row.get(11)?,
-                thumbhash: row.get(12)?,
-                is_favorite: row.get::<_, i64>(13)? != 0,
-                description: row.get(14)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(rusqlite::params![address], read_asset)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -381,33 +396,12 @@ impl Index {
     ///
     /// [`IndexError`] on database failure.
     pub fn trashed(&self) -> Result<Vec<AssetRecord>, IndexError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1,
-                    thumbhash, is_favorite, description
-             FROM assets
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS} FROM assets
              WHERE trashed_at IS NOT NULL
-             ORDER BY trashed_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AssetRecord {
-                address: row.get(0)?,
-                width: row.get(1)?,
-                height: row.get(2)?,
-                taken_at: row.get(3)?,
-                make: row.get(4)?,
-                model: row.get(5)?,
-                latitude: row.get(6)?,
-                longitude: row.get(7)?,
-                duration_ms: row.get(8)?,
-                byte_len: row.get(9)?,
-                file_name: row.get(10)?,
-                sha1: row.get(11)?,
-                thumbhash: row.get(12)?,
-                is_favorite: row.get::<_, i64>(13)? != 0,
-                description: row.get(14)?,
-            })
-        })?;
+             ORDER BY trashed_at DESC"
+        ))?;
+        let rows = stmt.query_map([], read_asset)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(IndexError::from)
     }
@@ -532,6 +526,19 @@ impl Index {
             .map_err(IndexError::from)
     }
 
+    /// Store an asset's perceptual hash (hex), after derivation.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexError`] on database failure.
+    pub fn record_phash(&self, address: &str, phash: &str) -> Result<(), IndexError> {
+        self.conn.execute(
+            "UPDATE assets SET phash = ?2 WHERE address = ?1",
+            rusqlite::params![address, phash],
+        )?;
+        Ok(())
+    }
+
     /// Set an asset's caption. Returns whether the asset exists.
     ///
     /// # Errors
@@ -600,12 +607,7 @@ impl Index {
             clauses.push(format!("is_favorite = ?{next}"));
             next += 1;
         }
-        let mut sql = String::from(
-            "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1,
-                    thumbhash, is_favorite, description
-             FROM assets",
-        );
+        let mut sql = format!("SELECT {ASSET_COLUMNS} FROM assets");
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
@@ -625,25 +627,7 @@ impl Index {
         params.push(Box::new(limit));
         params.push(Box::new(offset));
         let references: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(references.as_slice(), |row| {
-            Ok(AssetRecord {
-                address: row.get(0)?,
-                width: row.get(1)?,
-                height: row.get(2)?,
-                taken_at: row.get(3)?,
-                make: row.get(4)?,
-                model: row.get(5)?,
-                latitude: row.get(6)?,
-                longitude: row.get(7)?,
-                duration_ms: row.get(8)?,
-                byte_len: row.get(9)?,
-                file_name: row.get(10)?,
-                sha1: row.get(11)?,
-                thumbhash: row.get(12)?,
-                is_favorite: row.get::<_, i64>(13)? != 0,
-                description: row.get(14)?,
-            })
-        })?;
+        let rows = stmt.query_map(references.as_slice(), read_asset)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(IndexError::from)
     }
@@ -676,33 +660,13 @@ impl Index {
     ///
     /// [`IndexError`] on database failure.
     pub fn assets_in_day(&self, day: &str) -> Result<Vec<AssetRecord>, IndexError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash, is_favorite, description
-             FROM assets
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS}              FROM assets
              WHERE trashed_at IS NULL
                AND COALESCE(substr(taken_at, 1, 10), '1970-01-01') = ?1
-             ORDER BY substr(taken_at, 12, 8) DESC, address ASC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![day], |row| {
-            Ok(AssetRecord {
-                address: row.get(0)?,
-                width: row.get(1)?,
-                height: row.get(2)?,
-                taken_at: row.get(3)?,
-                make: row.get(4)?,
-                model: row.get(5)?,
-                latitude: row.get(6)?,
-                longitude: row.get(7)?,
-                duration_ms: row.get(8)?,
-                byte_len: row.get(9)?,
-                file_name: row.get(10)?,
-                sha1: row.get(11)?,
-                thumbhash: row.get(12)?,
-                is_favorite: row.get::<_, i64>(13)? != 0,
-                description: row.get(14)?,
-            })
-        })?;
+             ORDER BY substr(taken_at, 12, 8) DESC, address ASC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![day], read_asset)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(IndexError::from)
     }
@@ -837,36 +801,21 @@ impl Index {
     ///
     /// [`IndexError`] on database failure.
     pub fn album_assets(&self, id: &str) -> Result<Vec<AssetRecord>, IndexError> {
+        // The join cannot reuse {ASSET_COLUMNS} verbatim: `address` exists
+        // in both tables, so this is the one query that names every column
+        // through the `assets.` qualifier.
         let mut stmt = self.conn.prepare(
             "SELECT assets.address, assets.width, assets.height, assets.taken_at,
                     assets.make, assets.model, assets.latitude, assets.longitude,
                     assets.duration_ms, assets.byte_len, assets.file_name, assets.sha1,
-                    assets.thumbhash, assets.is_favorite, assets.description
+                    assets.thumbhash, assets.is_favorite, assets.description, assets.phash
              FROM album_assets m
              JOIN assets ON assets.address = m.address
              WHERE m.album_id = ?1
                AND assets.trashed_at IS NULL
              ORDER BY m.added_at ASC, m.address ASC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![id], |row| {
-            Ok(AssetRecord {
-                address: row.get(0)?,
-                width: row.get(1)?,
-                height: row.get(2)?,
-                taken_at: row.get(3)?,
-                make: row.get(4)?,
-                model: row.get(5)?,
-                latitude: row.get(6)?,
-                longitude: row.get(7)?,
-                duration_ms: row.get(8)?,
-                byte_len: row.get(9)?,
-                file_name: row.get(10)?,
-                sha1: row.get(11)?,
-                thumbhash: row.get(12)?,
-                is_favorite: row.get::<_, i64>(13)? != 0,
-                description: row.get(14)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![id], read_asset)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(IndexError::from)
     }
@@ -1102,41 +1051,22 @@ impl Index {
         day: u32,
         current_year: u32,
     ) -> Result<Vec<(u32, Vec<AssetRecord>)>, IndexError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT address, width, height, taken_at, make, model,
-                    latitude, longitude, duration_ms, byte_len, file_name, sha1, thumbhash,
-                    is_favorite, description, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ASSET_COLUMNS}, CAST(substr(taken_at, 1, 4) AS INTEGER) AS year
              FROM assets
              WHERE taken_at IS NOT NULL
                AND trashed_at IS NULL
                AND substr(taken_at, 6, 2) = ?1
                AND substr(taken_at, 9, 2) = ?2
                AND year < ?3
-             ORDER BY taken_at DESC",
-        )?;
+             ORDER BY taken_at DESC"
+        ))?;
         let month_str = format!("{month:02}");
         let day_str = format!("{day:02}");
         let rows = stmt.query_map(rusqlite::params![month_str, day_str, current_year], |row| {
-            Ok((
-                AssetRecord {
-                    address: row.get(0)?,
-                    width: row.get(1)?,
-                    height: row.get(2)?,
-                    taken_at: row.get(3)?,
-                    make: row.get(4)?,
-                    model: row.get(5)?,
-                    latitude: row.get(6)?,
-                    longitude: row.get(7)?,
-                    duration_ms: row.get(8)?,
-                    byte_len: row.get(9)?,
-                    file_name: row.get(10)?,
-                    sha1: row.get(11)?,
-                    thumbhash: row.get(12)?,
-                    is_favorite: row.get::<_, i64>(13)? != 0,
-                    description: row.get(14)?,
-                },
-                row.get::<_, u32>(15)?,
-            ))
+            let record = read_asset(row)?;
+            let year = row.get::<_, u32>(16)?;
+            Ok((record, year))
         })?;
         let rows: Vec<(AssetRecord, u32)> = rows.collect::<Result<Vec<_>, _>>()?;
         let mut groups: Vec<(u32, Vec<AssetRecord>)> = Vec::new();
@@ -1176,6 +1106,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), IndexError> {
         "ALTER TABLE assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE assets ADD COLUMN trashed_at TEXT",
         "ALTER TABLE assets ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE assets ADD COLUMN phash TEXT",
     ];
     for sql in migrations {
         let result = conn.execute_batch(sql);
@@ -1211,7 +1142,8 @@ CREATE TABLE IF NOT EXISTS assets (
     thumbhash  TEXT,
     is_favorite INTEGER NOT NULL DEFAULT 0,
     trashed_at TEXT,
-    description TEXT NOT NULL DEFAULT ''
+    description TEXT NOT NULL DEFAULT '',
+    phash TEXT
 );
 CREATE INDEX IF NOT EXISTS assets_taken_at ON assets(taken_at DESC);
 
