@@ -230,8 +230,16 @@ search, thumbnails, near-dup detection, transport — the loop pulled the
 literature, compared against restic/borg/kopia/Immich, decided in a
 Yellow Paper, proved the core claims in Lean, and implemented what won.
 See `.specs/01_research/` (10 YPs + registry) and
-`.specs/02_architecture/proofs/` (Cas.lean, Auth.lean, Policy.lean —
-verified with `lake env lean <file>`).
+`.specs/02_architecture/proofs/` (Cas.lean, Auth.lean, Policy.lean).
+
+**Proof status: all three files verify with zero errors and zero
+sorries** (`lake env lean <file>`): dedup idempotence, address
+separation under the (declared) injectivity assumption, GC safety,
+revocation soundness, logout idempotence, no-lockout-oracle,
+success-forgives, share scoping, trash exclusion, and
+ambiguity-never-skips. The sync invariant stands: these models mirror
+the Rust types, and a Rust change that breaks a mirrored shape must
+update its proof file in the same commit.
 
 Gaps the loop found and closed:
 
