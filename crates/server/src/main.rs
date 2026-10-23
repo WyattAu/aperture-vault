@@ -13,6 +13,11 @@
 //!   because the operator ran this.
 //! - `aperture-server scan <vault-root> <directory>` — ingest a folder
 //!   tree, skipping what the vault already holds by checksum.
+//! - `aperture-server watch <vault-root> <directory> [interval-secs]` —
+//!   run `scan` on a cadence (default 300s) inside the running server's
+//!   process shape: watch folders are the ingest path for tenants who
+//!   drop files into a mounted directory (SPEC: import; SIS round 8
+//!   iter 67 closed the photos-template gate).
 //! - `aperture-server gc <vault-root>` — mark-sweep the objects root
 //!   against the index (YP-CAS-GC-002). Operator-run, never automatic.
 
@@ -46,6 +51,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  failed: {}: {reason}", path.display());
         }
         return Ok(());
+    }
+    if first == "watch" {
+        let (root, dir, interval): (PathBuf, PathBuf, u64) = match (
+            args.next(),
+            args.next(),
+            args.next().and_then(|a| a.parse::<u64>().ok()),
+        ) {
+            (Some(root), Some(dir), interval) => (root.into(), dir.into(), interval.unwrap_or(300)),
+            _ => {
+                eprintln!("usage: aperture-server watch <vault-root> <directory> [interval-secs]");
+                std::process::exit(2);
+            }
+        };
+        let state = std::sync::Arc::new(aperture_server::AppState::new(&root)?);
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async move {
+            // Initial scan immediately, then every `interval` seconds.
+            // Each pass re-scans the whole tree; ingest is idempotent by
+            // checksum, so a pass costs one stat walk plus whatever is
+            // new. Failures are logged and retried next pass — a bad
+            // file must not kill the watcher.
+            loop {
+                let state = std::sync::Arc::clone(&state);
+                let dir = dir.clone();
+                let report = tokio::task::spawn_blocking(move || {
+                    let index = match state.lock_index() {
+                        Ok(i) => i,
+                        Err(e) => return Err(format!("index lock: {e}")),
+                    };
+                    aperture_pipeline::scan::scan_directory(state.store(), &index, &dir)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("watch task: {e}")));
+                match report {
+                    Ok(r) => {
+                        eprintln!(
+                            "[watch] scanned {}: {} ingested, {} already present, {} failed",
+                            r.scanned,
+                            r.ingested,
+                            r.skipped,
+                            r.failed.len()
+                        );
+                        for (path, reason) in &r.failed {
+                            eprintln!("  failed: {}: {reason}", path.display());
+                        }
+                    }
+                    Err(e) => eprintln!("[watch] scan error: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            }
+        });
     }
     if first == "gc" {
         let root: PathBuf = args.next().map(PathBuf::from).unwrap_or_else(|| {
