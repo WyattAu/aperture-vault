@@ -59,7 +59,7 @@ the endpoint answer accept for both, permanently.
 (computational, honest) injectivity assumption for BLAKE3, different
 bytes can never merge. The system's correctness **never depends on
 SHA-1**; it depends on BLAKE3, and the spec says so in one theorem.
-SHA-1 is a compatibility hint that can be wrong without hurting anyone : now enforced by construction, not by promise.
+SHA-1 is a compatibility hint that can be wrong without hurting anyone: now enforced by construction, not by promise.
 
 ## YP-5: Comparison
 
