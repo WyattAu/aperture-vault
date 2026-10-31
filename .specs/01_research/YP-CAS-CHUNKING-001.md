@@ -5,4 +5,4 @@
 - The one real CDC win for this workload; "video A and video B share
   40 minutes of footage"; is a *library curation* concern (Immich
 | restic / borg / kopia | CDC | Backup deltas | N/A; not backups |
-| **aperture-vault** | **whole-file** | Photos are immutable | - |
+| **aperture-vault** | **whole-file** | Photos are immutable |; |
